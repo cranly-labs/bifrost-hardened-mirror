@@ -1,0 +1,8 @@
+{
+  "digest": "sha256:b90f4b80d521b94d3778061435663deea96765ac0d799f5a92bb7c71001cde3f",
+  "distribution_version": "v2.4.0",
+  "image": "ghcr.io/cranly-labs/bifrost-hardened-mirror@sha256:b90f4b80d521b94d3778061435663deea96765ac0d799f5a92bb7c71001cde3f",
+  "rendered_at": "2026-11-01T15:32:19Z",
+  "upstream_commit": "e869c3f9adc96ea53c38694a21bb04a8e1085487",
+  "upstream_tag": "transports/v2.4.0"
+}

@@ -4,7 +4,7 @@
     "generator": "scripts/sync_upstream.py",
     "revision": 1
   },
-  "synced_at": "2026-11-01T02:11:52Z",
+  "synced_at": "2026-11-01T13:26:45Z",
   "upstream": {
     "commit": "e869c3f9adc96ea53c38694a21bb04a8e1085487",
     "git_tree": "0b6e424067e0afbfef63cd9a3301f63236b7059e",
@@ -23,14 +23,16 @@
       ".envrc",
       ".git",
       ".github",
+      ".gitignore",
       ".greptile",
       ".infisical.json",
       ".snyk",
       "AGENTS.md",
       "docs/media",
-      "pulse.yaml"
+      "pulse.yaml",
+      "scripts/terraform/sagemaker/.gitignore"
     ],
-    "file_count": 5459,
-    "tree_sha256": "7efb5707d3d845a9c19f0f30443866baedd0a6f0d33643d0a9e9967c6d6a2644"
+    "file_count": 5457,
+    "tree_sha256": "5c57b43953cfe194444e9e6aa914ad27ef8b6b8db72bbfc958ecf4e7ef4b427e"
   }
 }

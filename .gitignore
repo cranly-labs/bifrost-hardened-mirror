@@ -5,10 +5,10 @@
 !.env.*.example
 
 # Local runtime state
-data/
-.tmp/
-dist/
-sbom/
+/data/
+/.tmp/
+/dist/
+/sbom/
 *.db
 *.db-shm
 *.db-wal
@@ -30,3 +30,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+
+# The vendored snapshot must be complete. Upstream .gitignore files are removed
+# by the sync script so these negations cover the entire mirror.
+!upstream/**
+upstream/**/node_modules/

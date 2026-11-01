@@ -257,6 +257,10 @@ def prune(root: Path) -> list[str]:
                 path.unlink()
             removed.append(prefix.rstrip("/"))
 
+    for ignore_file in root.rglob(".gitignore"):
+        ignore_file.unlink()
+        removed.append(ignore_file.relative_to(root).as_posix())
+
     for ds_store in root.rglob(".DS_Store"):
         ds_store.unlink()
     return removed

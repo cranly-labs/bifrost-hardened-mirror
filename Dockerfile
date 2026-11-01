@@ -28,7 +28,7 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # UI build
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:25-alpine3.23@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS ui-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine3.23@sha256:e6c03d42b46af3b1e98207e59f06a43cfe5efd3ec4b4d3d9802bddf04f833374 AS ui-builder
 
 ENV NEXT_TELEMETRY_DISABLED=1 \
     npm_config_update_notifier=false \

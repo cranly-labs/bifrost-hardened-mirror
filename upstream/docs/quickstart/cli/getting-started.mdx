@@ -1,0 +1,89 @@
+---
+title: "Bifrost CLI"
+sidebarTitle: "Overview"
+description: "Install Bifrost CLI, understand OSS and Enterprise capabilities and credential types, and choose a setup path."
+icon: "laptop-code"
+---
+
+Bifrost CLI is both:
+
+- a launcher for coding agents (Claude Code, Codex CLI, Gemini CLI, and OpenCode) that routes them through Bifrost; and
+- a scriptable client for Bifrost inference, user-scoped usage, and management APIs.
+
+Running `bifrost` with no command opens the interactive launcher. Every other command works directly from a shell or CI job.
+
+## OSS and Enterprise at a glance
+
+| Capability | OSS | Enterprise |
+| --- | --- | --- |
+| Contexts, launcher, and coding-agent launches | Yes | Yes |
+| Inference with a virtual key | Yes | Yes |
+| Inference as the signed-in user (Enterprise SSO) | No | Yes |
+| `bifrost usage` (personal budgets, rate limits, top models) | No | Yes, with SSO |
+| Management authentication | Dashboard username and password | Scoped management API key |
+| Core management commands (`providers`, `credentials`, `virtual-keys`, `teams`, `customers`, `routing-rules`, `logs`, …) | Yes | Yes |
+| Enterprise management commands (`users`, `roles`, `business-units`, `access-profiles`, `management-keys`, `guardrails`, `devices`, `edge`, `audit-logs`, …) | No | Yes |
+
+Run `bifrost resources list` to see every resource command. Descriptions of Enterprise-only resources start with "Enterprise".
+
+## Credential types
+
+Bifrost separates inference credentials from management credentials. Each context stores its own set, so a credential for one environment is never sent to another.
+
+| Credential | Edition | Used for | How to set it |
+| --- | --- | --- | --- |
+| **Virtual key** (`sk-bf-*`) | OSS and Enterprise | Inference and coding agents | `bifrost auth set-virtual-key` |
+| **Enterprise SSO session** | Enterprise | Inference and coding agents as the signed-in user; assigned-key discovery; `bifrost usage` | `bifrost auth login` |
+| **Management API key** (`bfst-*`) | Enterprise | Administrative commands, limited to the key's scopes | `bifrost auth set-management-key` |
+| **Dashboard session** | OSS | Administrative commands on a gateway protected by dashboard username and password | `bifrost auth login --username` |
+
+<Warning>
+  Enterprise SSO does **not** authorize management APIs. Administrative commands always need a management API key, even after `bifrost auth login`.
+</Warning>
+
+When a context has both an SSO session and a virtual key, the CLI sends one inference credential: the SSO session for harnesses that support it, otherwise the virtual key. When both a management API key and a dashboard session are stored, the management API key is used.
+
+## Install the CLI
+
+<Steps>
+  <Step title="Run the installer">
+    Node.js 18 or later is required.
+
+    ```bash
+    npx -y @maximhq/bifrost-cli
+    ```
+
+    The installer downloads the binary for your platform, verifies its SHA-256 checksum when one is published, and installs it to `~/.bifrost/bin/bifrost`. On macOS and Linux it offers to add `~/.bifrost/bin` to your shell `PATH`. On Windows, add `%USERPROFILE%\.bifrost\bin` to `PATH` yourself.
+
+    To install a specific release, pass its tag:
+
+    ```bash
+    npx -y @maximhq/bifrost-cli --cli-version <version>   # for example v1.2.3
+    ```
+
+    To update an existing installation later, run `bifrost update`.
+  </Step>
+  <Step title="Verify the installation">
+    Open a new terminal and run:
+
+    ```bash
+    bifrost version
+    bifrost auth --help
+    ```
+
+    `bifrost version` prints the version and commit. `bifrost auth --help` lists the authentication actions.
+  </Step>
+</Steps>
+
+## Choose your setup
+
+<CardGroup cols={2}>
+  <Card title="OSS setup" icon="server" href="/quickstart/cli/oss-setup">
+    Connect to an open-source gateway with a virtual key.
+  </Card>
+  <Card title="Enterprise setup" icon="building" href="/quickstart/cli/enterprise-setup">
+    Sign in with SSO and add a management API key.
+  </Card>
+</CardGroup>
+
+Then continue with [contexts](/quickstart/cli/contexts), [coding agents](/quickstart/cli/coding-agents), and [commands](/quickstart/cli/commands).

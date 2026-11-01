@@ -1,0 +1,15 @@
+Bifrost Distribution
+Copyright 2026 The Bifrost Distribution contributors
+
+This distribution contains software from the Bifrost project
+(https://github.com/maximhq/bifrost), Copyright Maxim AI and the Bifrost
+contributors, licensed under the Apache License, Version 2.0.
+
+Bifrost and the Bifrost logo are trademarks of their respective owners. This
+repository is an independent distribution. It is not endorsed by, sponsored by,
+or affiliated with Maxim AI unless a separate written agreement states
+otherwise.
+
+The distribution layer (build definitions, release automation, deployment
+manifests, and documentation outside upstream/) is licensed under the Apache
+License, Version 2.0, the same terms as the upstream project.

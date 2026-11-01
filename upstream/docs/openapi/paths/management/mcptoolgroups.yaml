@@ -1,0 +1,291 @@
+# Paths for MCP Tool Group management.
+#
+# Deprecated: these are aliases for /api/mcp/virtual-mcps, kept so existing
+# integrations keep working. See paths/management/virtualmcps.yaml.
+
+mcp-tool-groups:
+  get:
+    operationId: listMCPToolGroups
+    deprecated: true
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        <Warning>
+          Deprecated. Tool groups were renamed to Virtual MCPs; use `/api/mcp/virtual-mcps`
+          instead. This alias serves the Enterprise tool-group handler, which does not accept
+          the `endpoint_slug`, `instructions`, or `instructions_mode` fields.
+        </Warning>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `VirtualMCPs:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
+    summary: List MCP Tool Groups
+    description: |
+      Returns tool groups visible to the caller. When all of `limit`, `offset`, and `search` are omitted, every group is returned in one response.
+
+      Deprecated: use the equivalent `/api/mcp/virtual-mcps` operation. Every response
+      from this alias carries `Link: <successor>; rel="successor-version"` and a
+      `Warning: 299` header naming the replacement.
+    tags:
+      - MCP Tool Groups
+    parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+      - name: offset
+        in: query
+        schema:
+          type: integer
+      - name: search
+        in: query
+        description: Search by name.
+        schema:
+          type: string
+    security:
+      - ManagementBearerAuth: []
+      - BasicAuth: []
+    responses:
+      '200':
+        description: Successful response
+        content:
+          application/json:
+            schema:
+              $ref: '../../schemas/management/mcptoolgroups.yaml#/MCPToolGroupListResponse'
+      '500':
+        $ref: '../../openapi.yaml#/components/responses/InternalError'
+
+  post:
+    operationId: createMCPToolGroup
+    deprecated: true
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        <Warning>
+          Deprecated. Tool groups were renamed to Virtual MCPs; use `/api/mcp/virtual-mcps`
+          instead. This alias serves the Enterprise tool-group handler, which does not accept
+          the `endpoint_slug`, `instructions`, or `instructions_mode` fields.
+        </Warning>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `VirtualMCPs:Create` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
+    summary: Create MCP Tool Group
+    description: |
+      Creates a new tool group along with its attachments in a single transaction.
+      Validates that every `mcp_client_id` points to a deployed MCP client and that every named
+      tool exists on its server.
+
+      Deprecated: use the equivalent `/api/mcp/virtual-mcps` operation. Every response
+      from this alias carries `Link: <successor>; rel="successor-version"` and a
+      `Warning: 299` header naming the replacement.
+    tags:
+      - MCP Tool Groups
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../../schemas/management/mcptoolgroups.yaml#/CreateMCPToolGroupRequest'
+    security:
+      - ManagementBearerAuth: []
+      - BasicAuth: []
+    responses:
+      '201':
+        description: Group created
+        content:
+          application/json:
+            schema:
+              $ref: '../../schemas/management/mcptoolgroups.yaml#/MCPToolGroupResponse'
+      '400':
+        description: Validation failed (missing name, invalid MCP client IDs, or invalid tool names).
+      '500':
+        $ref: '../../openapi.yaml#/components/responses/InternalError'
+
+mcp-tool-groups-by-id:
+  get:
+    operationId: getMCPToolGroup
+    deprecated: true
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        <Warning>
+          Deprecated. Tool groups were renamed to Virtual MCPs; use `/api/mcp/virtual-mcps`
+          instead. This alias serves the Enterprise tool-group handler, which does not accept
+          the `endpoint_slug`, `instructions`, or `instructions_mode` fields.
+        </Warning>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `VirtualMCPs:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
+    summary: Get MCP Tool Group by ID
+    description: |
+      Deprecated: use the equivalent `/api/mcp/virtual-mcps` operation. Every response
+      from this alias carries `Link: <successor>; rel="successor-version"` and a
+      `Warning: 299` header naming the replacement.
+    tags:
+      - MCP Tool Groups
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    security:
+      - ManagementBearerAuth: []
+      - BasicAuth: []
+    responses:
+      '200':
+        description: Successful response
+        content:
+          application/json:
+            schema:
+              $ref: '../../schemas/management/mcptoolgroups.yaml#/MCPToolGroupResponse'
+      '404':
+        description: MCP tool group not found
+      '500':
+        $ref: '../../openapi.yaml#/components/responses/InternalError'
+
+  put:
+    operationId: updateMCPToolGroup
+    deprecated: true
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        <Warning>
+          Deprecated. Tool groups were renamed to Virtual MCPs; use `/api/mcp/virtual-mcps`
+          instead. This alias serves the Enterprise tool-group handler, which does not accept
+          the `endpoint_slug`, `instructions`, or `instructions_mode` fields.
+        </Warning>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `VirtualMCPs:Update` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
+    summary: Update MCP Tool Group
+    description: |
+      Partial update. Scalar fields preserve the current value when omitted.
+      Array fields are replace-on-send: an empty array clears all attachments in that dimension.
+
+      Deprecated: use the equivalent `/api/mcp/virtual-mcps` operation. Every response
+      from this alias carries `Link: <successor>; rel="successor-version"` and a
+      `Warning: 299` header naming the replacement.
+    tags:
+      - MCP Tool Groups
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '../../schemas/management/mcptoolgroups.yaml#/UpdateMCPToolGroupRequest'
+    security:
+      - ManagementBearerAuth: []
+      - BasicAuth: []
+    responses:
+      '200':
+        description: Group updated
+        content:
+          application/json:
+            schema:
+              $ref: '../../schemas/management/mcptoolgroups.yaml#/MCPToolGroupResponse'
+      '400':
+        description: Validation failed.
+      '404':
+        description: MCP tool group not found
+      '500':
+        $ref: '../../openapi.yaml#/components/responses/InternalError'
+
+  delete:
+    operationId: deleteMCPToolGroup
+    deprecated: true
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        <Warning>
+          Deprecated. Tool groups were renamed to Virtual MCPs; use `/api/mcp/virtual-mcps`
+          instead. This alias serves the Enterprise tool-group handler, which does not accept
+          the `endpoint_slug`, `instructions`, or `instructions_mode` fields.
+        </Warning>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `VirtualMCPs:Delete` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
+    summary: Delete MCP Tool Group
+    description: |
+      Deletes the group; attachments are removed automatically.
+
+      Deprecated: use the equivalent `/api/mcp/virtual-mcps` operation. Every response
+      from this alias carries `Link: <successor>; rel="successor-version"` and a
+      `Warning: 299` header naming the replacement.
+    tags:
+      - MCP Tool Groups
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    security:
+      - ManagementBearerAuth: []
+      - BasicAuth: []
+    responses:
+      '200':
+        description: Group deleted
+        content:
+          application/json:
+            schema:
+              $ref: '../../schemas/management/mcptoolgroups.yaml#/MCPToolGroupDeleteResponse'
+      '404':
+        description: MCP tool group not found
+      '500':
+        $ref: '../../openapi.yaml#/components/responses/InternalError'

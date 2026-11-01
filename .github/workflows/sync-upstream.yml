@@ -1,0 +1,159 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Four times a day. The sparse clone is cheap and keeps the distribution
+    # close to upstream without creating noisy empty runs.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Explicit upstream tag (default: latest stable transports/v*)"
+        required: false
+        type: string
+      include_prerelease:
+        description: "Include prerelease gateway tags"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Vendor upstream release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REF: ${{ inputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Check for a newer upstream release
+        id: check
+        if: inputs.ref == ''
+        run: |
+          if [ "${{ inputs.include_prerelease }}" = "true" ]; then
+            python3 scripts/check_upstream.py --include-prerelease
+          else
+            python3 scripts/check_upstream.py
+          fi
+
+      - name: Report pinned state
+        if: inputs.ref == '' && steps.check.outputs.update != 'true'
+        run: |
+          echo "::notice::Already pinned to ${{ steps.check.outputs.current }}; no sync required."
+
+      - name: Sync upstream snapshot
+        id: sync
+        if: inputs.ref != '' || steps.check.outputs.update == 'true'
+        run: |
+          if [ -n "$REF" ]; then
+            python3 scripts/sync_upstream.py --ref "$REF" --force
+          elif [ "${{ inputs.include_prerelease }}" = "true" ]; then
+            python3 scripts/sync_upstream.py --latest --include-prerelease
+          else
+            python3 scripts/sync_upstream.py --latest
+          fi
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          lock = json.load(open("vendor.lock.json", encoding="utf-8"))
+          print(f"tag={lock['upstream']['tag']}")
+          print(f"version={lock['upstream']['version']}")
+          print(f"commit={lock['upstream']['commit']}")
+          print(f"tree={lock['vendor']['tree_sha256']}")
+          print(f"files={lock['vendor']['file_count']}")
+          print(f"revision={lock['distribution']['revision']}")
+          PY
+
+      - name: Detect changes
+        id: changes
+        if: inputs.ref != '' || steps.check.outputs.update == 'true'
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Upstream snapshot is already current."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create synchronization branch
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.sync.outputs.version }}
+        run: |
+          BRANCH="automation/upstream-v${VERSION}"
+          echo "BRANCH=${BRANCH}" >> "$GITHUB_ENV"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "chore(upstream): sync Bifrost v${VERSION}"
+          git push --force origin "$BRANCH"
+
+      - name: Prepare pull request body
+        if: steps.changes.outputs.changed == 'true'
+        run: python3 scripts/render_pr_body.py > /tmp/pr-body.md
+
+      - name: Close superseded synchronization pull requests
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.sync.outputs.version }}
+        run: |
+          gh pr list \
+            --label upstream-sync \
+            --state open \
+            --json number,headRefName \
+            --jq '.[] | "\(.number) \(.headRefName)"' |
+          while read -r number head; do
+            [ -n "$number" ] || continue
+            if [ "$head" != "$BRANCH" ]; then
+              gh pr close "$number" \
+                --delete-branch \
+                --comment "Superseded by the synchronization pull request for v${VERSION}." || true
+            fi
+          done
+
+      - name: Open or update pull request
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.sync.outputs.version }}
+          TAG: ${{ steps.sync.outputs.tag }}
+        run: |
+          gh label create upstream-sync --color 0E8A16 --description "Automated upstream synchronization" >/dev/null 2>&1 || true
+          gh label create automated --color 5319E7 --description "Generated by automation" >/dev/null 2>&1 || true
+
+          PR_NUMBER="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore(upstream): sync Bifrost v${VERSION}" \
+              --body-file /tmp/pr-body.md
+            PR_NUMBER="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          else
+            gh pr edit "$PR_NUMBER" \
+              --title "chore(upstream): sync Bifrost v${VERSION}" \
+              --body-file /tmp/pr-body.md
+          fi
+
+          gh pr edit "$PR_NUMBER" --add-label upstream-sync --add-label automated || true
+
+          if ! gh pr merge "$PR_NUMBER" --auto --squash --delete-branch; then
+            echo "::warning::Auto-merge is not enabled. The pull request is ready and will merge after CI once auto-merge is enabled."
+          fi

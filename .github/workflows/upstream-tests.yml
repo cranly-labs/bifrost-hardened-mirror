@@ -1,0 +1,43 @@
+name: Upstream tests (advisory)
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-tests
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    name: Upstream Go unit tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache-dependency-path: upstream/transports/go.sum
+
+      - name: Install SQLite headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Run upstream transport tests
+        working-directory: upstream/transports/bifrost-http
+        env:
+          CGO_ENABLED: "1"
+          GOWORK: "off"
+        run: go test -short -count=1 ./...

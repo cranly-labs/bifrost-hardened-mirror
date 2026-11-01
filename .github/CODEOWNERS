@@ -1,0 +1,8 @@
+# Repository owners.
+* @OWNER
+
+/.github/ @OWNER
+/deploy/ @OWNER
+/scripts/ @OWNER
+/Dockerfile @OWNER
+/vendor.lock.json @OWNER

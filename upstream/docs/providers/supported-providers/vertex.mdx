@@ -1,0 +1,1519 @@
+---
+title: "Vertex AI"
+description: "Google Vertex AI API conversion guide - multi-model support, OAuth2 authentication, project/region configuration"
+icon: "v"
+---
+
+## Overview
+
+Vertex AI is Google's unified ML platform providing access to Google's Gemini models, Anthropic Claude models, and other third-party LLMs through a single API. Bifrost performs conversions including:
+
+- **Multi-model support** - Unified interface for Gemini, Anthropic, and third-party models
+- **OAuth2 authentication** - Service account credentials with automatic token refresh
+- **Project and region management** - Automatic endpoint construction from GCP project/region
+- **Model routing** - Automatic provider detection (Gemini vs Anthropic) based on model name
+- **Request conversion** - Conversion to underlying provider format (Gemini or Anthropic)
+- **Embeddings support** - Vector generation with task type and truncation options
+- **Model discovery** - Paginated model listing with deployment information
+
+### Supported Operations
+
+| Operation            | Non-Streaming | Streaming | Endpoint                                  |
+| -------------------- | ------------- | --------- | ----------------------------------------- |
+| Chat Completions     | ✅            | ✅        | `/generate`                               |
+| Responses API        | ✅            | ✅        | `/messages`                               |
+| Embeddings           | ✅            | -         | `/embeddings`                             |
+| Image Generation     | ✅            | -         | `/generateContent` or `/predict` (Imagen) |
+| Image Edit           | ✅            | -         | `/generateContent` or `/predict` (Imagen) |
+| Video Generation     | ✅            | -         | `/predictLongRunning` (Veo models only)   |
+| Image Variation      | ❌            | -         | Not supported                             |
+| List Models          | ✅            | -         | `/publishers/{publisher}/models`          |
+| Text Completions     | ❌            | ❌        | -                                         |
+| Speech (TTS)         | ❌            | ❌        | -                                         |
+| Transcriptions (STT) | ❌            | ❌        | -                                         |
+| Files                | ❌            | ❌        | -                                         |
+| Batch                | ❌            | ❌        | -                                         |
+
+<Note>
+**Unsupported Operations** (❌): Text Completions, Speech, Transcriptions, Files, and Batch are not supported by Vertex AI. These return `UnsupportedOperationError`.
+
+**Vertex-specific**: Endpoints vary by model type. Responses API available for both Gemini and Anthropic models.
+
+</Note>
+
+---
+
+## Setup & Configuration
+
+Vertex AI requires Google Cloud project configuration and authentication credentials. Four authentication methods are supported.
+
+<Note>
+  The `aliases` field (mapping model names to fine-tuned model IDs or endpoint
+  identifiers) requires **v1.5.0-prerelease2 or later**. On v1.4.x, use
+  `deployments` inside `vertex_key_config` instead - see the [v1.5.0 Migration
+  Guide](/migration-guides/v1.5.0#breaking-change-9-provider-deployments-removed-migrate-to-aliases)
+  for details.
+</Note>
+
+### 1. Service Account JSON (Recommended for Production)
+
+Provide a credential JSON string in `auth_credentials`. The JSON must contain a `type` field. Supported types: `service_account` (most common), `impersonated_service_account`, `authorized_user`, `external_account`, `external_account_authorized_user`. The document names the token, impersonation and credential-source URLs the Google client dials, so setting, changing or removing it through the API is held to the same rule as a key endpoint: a request admitted without any credential check (dashboard authentication disabled or unconfigured, or a whitelisted route) is refused with `403`. A request that passed a credential check may set it: an authenticated admin session, or, while the setup lock is active, a request carrying the configured setup token (see [Provider endpoint URLs](/deployment-guides/how-to/security-best-practices#provider-endpoint-urls)).
+
+<Note>
+  An `external_account` JSON (a Workload Identity Federation credential config) is accepted here
+  too. File, URL and executable `credential_source` shapes, for example a projected Kubernetes
+  ServiceAccount token, are handled by Google's library as-is. The AWS shape
+  (`"environment_id": "aws1"`, produced by `gcloud ... create-cred-config --aws`) is resolved by
+  Bifrost through the AWS SDK default chain, so it works on EKS with IRSA or Pod Identity exactly
+  like [AWS Workload Identity Federation](#4-aws-workload-identity-federation-eks); the structured
+  block is the recommended form because it needs no credential file.
+</Note>
+
+<Tabs>
+
+<Tab title="Web UI">
+
+<Frame>
+  <img
+    src="/media/ui-vertex-service-account-auth-setup.png"
+    alt="Google Vertex AI Service Account (JSON) authentication setup in the Bifrost Web UI showing Project ID, Region, and Auth Credentials fields"
+  />
+</Frame>
+
+1. Navigate to **"Model Providers"** → **"Configurations"** → **"Google Vertex"**
+2. Click **"Add Key"** (or edit an existing key)
+3. Under **Authentication Method**, select **"Service Account (JSON)"**
+4. Set **Project ID**: Your Google Cloud project ID
+5. Set **Project Number** (Required only for fine-tuned models): Your GCP project number; leave blank for standard models
+6. Set **Region**: e.g., `us-central1`
+7. Set **Auth Credentials**: Paste your service account JSON or reference an env var (e.g., `env.VERTEX_CREDENTIALS`)
+8. Configure **Aliases**: Map model names to fine-tuned model IDs (if using fine-tuned models)
+9. Save
+
+</Tab>
+
+<Tab title="API">
+
+```bash
+# Step 1: Create the provider
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "vertex"}'
+
+# Step 2: Create a key (Service Account JSON)
+curl -X POST http://localhost:8080/api/providers/vertex/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "vertex-sa-key",
+    "value": "",
+    "models": ["*"],
+    "weight": 1.0,
+    "vertex_key_config": {
+      "project_id": "env.VERTEX_PROJECT_ID",
+      "region": "us-central1",
+      "auth_credentials": "env.VERTEX_CREDENTIALS"
+    }
+  }'
+```
+
+<Note>
+  **On v1.4.x**, two differences apply: - Pass `keys` directly in the `POST
+  /api/providers` body - there is no separate `/api/providers/{provider}/keys`
+  endpoint. - Use `deployments` inside `vertex_key_config` instead of the
+  top-level `aliases` field for fine-tuned model mappings.
+</Note>
+
+</Tab>
+
+<Tab title="config.json">
+
+```json
+{
+  "providers": {
+    "vertex": {
+      "keys": [
+        {
+          "name": "vertex-sa-key",
+          "value": "",
+          "models": ["*"],
+          "weight": 1.0,
+          "vertex_key_config": {
+            "project_id": "env.VERTEX_PROJECT_ID",
+            "region": "us-central1",
+            "auth_credentials": "env.VERTEX_CREDENTIALS"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+<Note>
+  On **v1.4.x**, use `deployments` inside `vertex_key_config` instead of the
+  top-level `aliases` field for fine-tuned model mappings.
+</Note>
+
+</Tab>
+
+<Tab title="Go SDK">
+
+```go
+func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+    switch provider {
+    case schemas.Vertex:
+        return []schemas.Key{
+            {
+                Value:  schemas.SecretVar{}, // Leave empty when using service account credentials
+                Models: []string{"*"},
+                Weight: 1.0,
+                VertexKeyConfig: &schemas.VertexKeyConfig{
+                    ProjectID:       *schemas.NewSecretVar("env.VERTEX_PROJECT_ID"),
+                    Region:          *schemas.NewSecretVar("us-central1"),
+                    AuthCredentials: *schemas.NewSecretVar("env.VERTEX_CREDENTIALS"), // full service account JSON
+                },
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not supported", provider)
+}
+```
+
+</Tab>
+
+</Tabs>
+
+### 2. Application Default Credentials
+
+Leave `auth_credentials` empty. Bifrost calls `google.FindDefaultCredentials()` - Google's ADC library - which resolves credentials in this order:
+
+1. `GOOGLE_APPLICATION_CREDENTIALS` env var (path to a JSON credential file)
+2. Application default credential file (`~/.config/gcloud/application_default_credentials.json`, written by `gcloud auth application-default login`)
+3. GCE/GKE/Cloud Run/App Engine metadata server (attached service account or Workload Identity)
+
+<Tabs>
+
+<Tab title="Web UI">
+
+<Frame>
+  <img
+    src="/media/ui-vertex-default-service-account-auth-setup.png"
+    alt="Google Vertex AI Application Default Credentials setup in the Bifrost Web UI showing Project ID and Region fields with no credential inputs"
+  />
+</Frame>
+
+1. Navigate to **"Model Providers"** → **"Configurations"** → **"Google Vertex"**
+2. Click **"Add Key"** (or edit an existing key)
+3. Under **Authentication Method**, select **"Service Account (Attached)"**
+4. Set **Project ID**: Your Google Cloud project ID
+5. Set **Project Number** (Required only for fine-tuned models): Your GCP project number; leave blank for standard models
+6. Set **Region**: e.g., `us-central1`
+7. Configure **Aliases** if needed
+8. Save
+
+Ensure `GOOGLE_APPLICATION_CREDENTIALS` is set in your environment, or that Workload Identity / gcloud is configured.
+
+</Tab>
+
+<Tab title="API">
+
+```bash
+# Step 1: Create the provider
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "vertex"}'
+
+# Step 2: Create a key (Application Default Credentials)
+curl -X POST http://localhost:8080/api/providers/vertex/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "vertex-adc-key",
+    "value": "",
+    "models": ["*"],
+    "weight": 1.0,
+    "vertex_key_config": {
+      "project_id": "env.VERTEX_PROJECT_ID",
+      "region": "us-central1",
+      "auth_credentials": ""
+    }
+  }'
+```
+
+<Note>
+  **On v1.4.x**, pass `keys` directly in the `POST /api/providers` body - there
+  is no separate `/api/providers/{provider}/keys` endpoint.
+</Note>
+
+</Tab>
+
+<Tab title="config.json">
+
+```json
+{
+  "providers": {
+    "vertex": {
+      "keys": [
+        {
+          "name": "vertex-adc-key",
+          "value": "",
+          "models": ["*"],
+          "weight": 1.0,
+          "vertex_key_config": {
+            "project_id": "env.VERTEX_PROJECT_ID",
+            "region": "us-central1",
+            "auth_credentials": ""
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+</Tab>
+
+<Tab title="Go SDK">
+
+```go
+func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+    switch provider {
+    case schemas.Vertex:
+        return []schemas.Key{
+            {
+                Value:  schemas.SecretVar{},
+                Models: []string{"*"},
+                Weight: 1.0,
+                VertexKeyConfig: &schemas.VertexKeyConfig{
+                    ProjectID: *schemas.NewSecretVar("env.VERTEX_PROJECT_ID"),
+                    Region:    *schemas.NewSecretVar("us-central1"),
+                    // Leave AuthCredentials empty - uses Application Default Credentials
+                },
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not supported", provider)
+}
+```
+
+</Tab>
+
+</Tabs>
+
+### 3. API Key (Gemini and Fine-Tuned Models Only)
+
+Set `value` to your Vertex API key. API key authentication is supported only for Gemini models and fine-tuned Gemini models. For Anthropic models on Vertex, use Service Account or Application Default Credentials.
+
+<Tabs>
+
+<Tab title="Web UI">
+
+<Frame>
+  <img
+    src="/media/ui-vertex-api-key-auth-setup.png"
+    alt="Google Vertex AI API Key authentication setup in the Bifrost Web UI showing API Key, Project ID, Region, and Project Number fields"
+  />
+</Frame>
+
+1. Navigate to **"Model Providers"** → **"Configurations"** → **"Google Vertex"**
+2. Click **"Add Key"** (or edit an existing key)
+3. Under **Authentication Method**, select **"API Key"**
+4. Set **API Key**: Your Vertex AI API key
+5. Set **Project ID**: Your Google Cloud project ID
+6. Set **Project Number** (Required only for fine-tuned models): Your GCP project number; leave blank for standard models
+7. Set **Region**: e.g., `us-central1`
+8. Configure **Aliases**: Map short names to fine-tuned model IDs (e.g., `my-model` → `123456789`)
+9. Save
+
+</Tab>
+
+<Tab title="API">
+
+```bash
+# Step 1: Create the provider
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "vertex"}'
+
+# Step 2: Create a key (API Key - Gemini + fine-tuned models)
+curl -X POST http://localhost:8080/api/providers/vertex/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "vertex-api-key",
+    "value": "env.VERTEX_API_KEY",
+    "models": ["gemini-pro", "gemini-2.0-flash", "my-fine-tuned-model"],
+    "weight": 1.0,
+    "aliases": {
+      "my-fine-tuned-model": "123456789"
+    },
+    "vertex_key_config": {
+      "project_id": "env.VERTEX_PROJECT_ID",
+      "project_number": "env.VERTEX_PROJECT_NUMBER",
+      "region": "us-central1"
+    }
+  }'
+```
+
+<Note>
+**On v1.4.x**, two differences apply:
+- Pass `keys` directly in the `POST /api/providers` body - there is no separate `/api/providers/{provider}/keys` endpoint.
+- Replace the top-level `aliases` with `"deployments"` inside `vertex_key_config`:
+```json
+"vertex_key_config": {
+  "project_id": "env.VERTEX_PROJECT_ID",
+  "region": "us-central1",
+  "deployments": {
+    "my-fine-tuned-model": "123456789"
+  }
+}
+```
+</Note>
+
+</Tab>
+
+<Tab title="config.json">
+
+```json
+{
+  "providers": {
+    "vertex": {
+      "keys": [
+        {
+          "name": "vertex-api-key",
+          "value": "env.VERTEX_API_KEY",
+          "models": ["gemini-pro", "gemini-2.0-flash", "my-fine-tuned-model"],
+          "weight": 1.0,
+          "aliases": {
+            "my-fine-tuned-model": "123456789"
+          },
+          "vertex_key_config": {
+            "project_id": "env.VERTEX_PROJECT_ID",
+            "project_number": "env.VERTEX_PROJECT_NUMBER",
+            "region": "us-central1"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+<Note>
+  On **v1.4.x**, use `deployments` inside `vertex_key_config` instead of the
+  top-level `aliases` field.
+</Note>
+
+</Tab>
+
+<Tab title="Go SDK">
+
+```go
+func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+    switch provider {
+    case schemas.Vertex:
+        return []schemas.Key{
+            {
+                Value:  *schemas.NewSecretVar("env.VERTEX_API_KEY"), // only when using Gemini or fine-tuned models
+                Models: []string{"gemini-pro", "gemini-2.0-flash", "my-fine-tuned-model"},
+                Weight: 1.0,
+                Aliases: schemas.KeyAliases{
+                    "my-fine-tuned-model": "123456789",
+                },
+                VertexKeyConfig: &schemas.VertexKeyConfig{
+                    ProjectID:     *schemas.NewSecretVar("env.VERTEX_PROJECT_ID"),
+                    ProjectNumber: *schemas.NewSecretVar("env.VERTEX_PROJECT_NUMBER"), // required for fine-tuned models
+                    Region:        *schemas.NewSecretVar("us-central1"),
+                },
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not supported", provider)
+}
+```
+
+</Tab>
+
+</Tabs>
+
+<Note>
+  Vertex AI support for fine-tuned models is currently in beta. Requests to
+  non-Gemini fine-tuned models may fail, so please test and report any issues.
+</Note>
+
+**`vertex_key_config` fields:**
+
+| Field                 | Required | Description                                                                                          |
+| --------------------- | -------- | -------------------------------------------------------------------------------------------------- |
+| `project_id`          | Yes      | Google Cloud project ID                                                                            |
+| `region`              | Yes      | GCP region (e.g., `us-central1`, `eu-west1`, `global`)                                             |
+| `auth_credentials`    | No       | Service account JSON string (leave empty for ADC)                                                  |
+| `project_number`      | No       | GCP project number (required for fine-tuned models)                                                |
+| `force_single_region` | No       | When `true`, always call `region` and skip multi-region promotion of multi-region-only models     |
+| `use_session_routing`     | No       | When `true`, send `prompt_cache_key` to Gemini models as `session_id` (see [Session routing](#session-routing)) |
+
+**Key-level fields:**
+
+| Field     | Required | Description                                                                               |
+| --------- | -------- | ----------------------------------------------------------------------------------------- |
+| `value`   | No       | Vertex API key (Gemini and fine-tuned models only; leave empty for Service Account / ADC) |
+| `aliases` | No       | Map model names to fine-tuned model IDs or endpoint identifiers (v1.5.0-prerelease2+)     |
+| `models`  | Yes      | Models this key can serve; use `["*"]` to allow all                                       |
+
+---
+
+### 4. AWS Workload Identity Federation (EKS)
+
+Set `aws_workload_identity` to federate the AWS identity attached to the Bifrost workload (EKS IRSA or Pod Identity, ECS task role, EC2 instance profile, or `AWS_*` env vars) into a GCP token through a Workload Identity Pool **AWS provider**. No GCP service account key and no static AWS key are required. Bifrost resolves AWS credentials with the AWS SDK default chain, signs an STS `GetCallerIdentity` request with them, and exchanges that signature at the GCP Security Token Service. The default chain consults static credentials first: if `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are present in the workload environment, Bifrost federates as that key rather than as the attached role, so remove them when the attached role is the intended identity. When `service_account_email` is set the federated token is swapped for a service-account token; otherwise the federated principal calls Vertex AI directly.
+
+This block takes precedence over `auth_credentials` and the two must not be combined. The AWS side and the GCP side are set up in [AWS Workload Identity Federation](#aws-workload-identity-federation) below.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `audience` | Yes | Provider resource name: `//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID` |
+| `service_account_email` | No | Service account to impersonate. Omit to grant Vertex access to the federated principal directly |
+| `token_lifetime_seconds` | No | Lifetime of the impersonated token (600 to 43200, default 3600). Only used with `service_account_email`. Values above 3600 require the target service account to be allowed by the organization policy constraint `constraints/iam.allowServiceAccountCredentialLifetimeExtension`; otherwise token generation fails |
+| `aws_region` | No | Region for the STS signature. Defaults to `AWS_REGION` / `AWS_DEFAULT_REGION`, then instance metadata |
+| `aws_role_arn` | No | Assume this IAM role with the workload's credentials before the exchange. Usually unnecessary: map the workload's own role in the pool provider |
+
+`PROJECT_NUMBER` in the audience is the numeric project number, not the project ID you enter elsewhere in the key. Look it up with:
+
+```bash
+gcloud projects describe PROJECT_ID --format="value(projectNumber)"
+```
+
+All string fields accept `env.VAR_NAME` references. GovCloud and China partitions are supported: the STS host is derived from the region.
+
+<Tabs>
+
+<Tab title="Web UI">
+
+1. Navigate to **"Model Providers"** → **"Configurations"** → **"Google Vertex"**
+2. Click **"Add Key"** (or edit an existing key)
+3. Under **Authentication Method**, select **"Workload Identity (AWS)"**
+4. Set **Project ID**: Your Google Cloud project ID
+5. Set **Region**: e.g., `us-central1`
+6. Set **Workload Identity Provider Audience**: the `//iam.googleapis.com/...` resource name of the AWS provider in your pool
+7. _(Optional)_ Set **Service Account to Impersonate**, **AWS Region** and **AWS Role ARN to Assume**
+8. Save
+
+</Tab>
+
+<Tab title="API">
+
+```bash
+# Step 1: Create the provider
+curl -X POST http://localhost:8080/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "vertex"}'
+
+# Step 2: Create a key (AWS Workload Identity Federation)
+curl -X POST http://localhost:8080/api/providers/vertex/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "vertex-eks-key",
+    "value": "",
+    "models": ["*"],
+    "weight": 1.0,
+    "vertex_key_config": {
+      "project_id": "env.VERTEX_PROJECT_ID",
+      "region": "us-central1",
+      "aws_workload_identity": {
+        "audience": "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/eks-pool/providers/aws",
+        "service_account_email": "bifrost-vertex@my-gcp-project.iam.gserviceaccount.com"
+      }
+    }
+  }'
+```
+
+</Tab>
+
+<Tab title="config.json">
+
+```json
+{
+  "providers": {
+    "vertex": {
+      "keys": [
+        {
+          "name": "vertex-eks-key",
+          "value": "",
+          "models": ["*"],
+          "weight": 1.0,
+          "vertex_key_config": {
+            "project_id": "env.VERTEX_PROJECT_ID",
+            "region": "us-central1",
+            "aws_workload_identity": {
+              "audience": "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/eks-pool/providers/aws",
+              "service_account_email": "bifrost-vertex@my-gcp-project.iam.gserviceaccount.com"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+</Tab>
+
+<Tab title="Go SDK">
+
+```go
+func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+    switch provider {
+    case schemas.Vertex:
+        return []schemas.Key{
+            {
+                Value:  schemas.SecretVar{},
+                Models: []string{"*"},
+                Weight: 1.0,
+                VertexKeyConfig: &schemas.VertexKeyConfig{
+                    ProjectID: *schemas.NewSecretVar("env.VERTEX_PROJECT_ID"),
+                    Region:    *schemas.NewSecretVar("us-central1"),
+                    AWSWorkloadIdentity: &schemas.VertexAWSWorkloadIdentityConfig{
+                        Audience:            *schemas.NewSecretVar("//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/eks-pool/providers/aws"),
+                        ServiceAccountEmail: schemas.NewSecretVar("bifrost-vertex@my-gcp-project.iam.gserviceaccount.com"),
+                    },
+                },
+            },
+        }, nil
+    }
+    return nil, fmt.Errorf("provider %s not supported", provider)
+}
+```
+
+</Tab>
+
+</Tabs>
+
+## GKE Workload Identity Federation
+
+When running Bifrost on GKE, [Workload Identity Federation](https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity) (WIF) lets pods authenticate to Vertex AI without managing service account keys. The pod inherits an IAM identity through the Kubernetes ServiceAccount, and Bifrost picks it up automatically via [Application Default Credentials](#2-application-default-credentials).
+
+**What you need:**
+
+1. The GCP-side prerequisites below (API enabled, IAM service account, WIF binding)
+2. A Bifrost Vertex key using **"Service Account (Attached)"** auth - see [Application Default Credentials](#2-application-default-credentials) for Web UI, API, config.json, and Go SDK setup. For Helm, see [Helm - Google Vertex AI](/deployment-guides/helm/providers#google-vertex-ai).
+3. The Kubernetes ServiceAccount annotated for WIF:
+
+```bash
+kubectl annotate serviceaccount KSA_NAME \
+  --namespace NAMESPACE \
+  iam.gke.io/gcp-service-account=IAM_SA_NAME@PROJECT_ID.iam.gserviceaccount.com
+```
+
+Replace `IAM_SA_NAME` with the IAM Service Account created in [Step 3](#gcp-prerequisites) below.
+
+### GCP Prerequisites
+
+<Accordion title="Step 1: Enable the Vertex AI API">
+
+The Vertex AI API must be enabled in your project. Search for `aiplatform` in the [API Library](https://console.cloud.google.com/apis/library) or run:
+
+```bash
+gcloud services enable aiplatform.googleapis.com --project=PROJECT_ID
+```
+
+WIF uses the IAM Credentials API for token exchange. Enable it as well:
+
+```bash
+gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID
+```
+
+</Accordion>
+
+<Accordion title="Step 2: Enable Workload Identity on GKE">
+
+**Autopilot clusters:** WIF is always enabled. Skip this step.
+
+**Standard clusters:** Enable the workload identity pool and GKE metadata server:
+
+```bash
+# Enable Workload Identity on the cluster
+gcloud container clusters update CLUSTER_NAME \
+  --location=LOCATION \
+  --workload-pool=PROJECT_ID.svc.id.goog
+
+# Enable GKE metadata server on each node pool
+gcloud container node-pools update NODEPOOL_NAME \
+  --cluster=CLUSTER_NAME \
+  --location=LOCATION \
+  --workload-metadata=GKE_METADATA
+```
+
+Verify:
+
+```bash
+gcloud container clusters describe CLUSTER_NAME \
+  --location=LOCATION \
+  --format="value(workloadIdentityConfig.workloadPool)"
+# Expected: PROJECT_ID.svc.id.goog
+```
+
+</Accordion>
+
+<Accordion title="Step 3: Create an IAM Service Account and grant Vertex access">
+
+Create a dedicated IAM Service Account (or use an existing one) and grant it the Vertex AI User role:
+
+```bash
+# Create the service account
+gcloud iam service-accounts create IAM_SA_NAME \
+  --display-name="Bifrost Vertex AI" \
+  --project=PROJECT_ID
+
+# Grant Vertex AI access
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:IAM_SA_NAME@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"
+```
+
+</Accordion>
+
+<Accordion title="Step 4: Bind the Kubernetes ServiceAccount to the IAM Service Account">
+
+Allow the Kubernetes ServiceAccount to impersonate the IAM Service Account:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  IAM_SA_NAME@PROJECT_ID.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/KSA_NAME]"
+```
+
+Replace `NAMESPACE` and `KSA_NAME` with your Bifrost pod's namespace and Kubernetes ServiceAccount name.
+
+Then annotate the Kubernetes ServiceAccount so GKE knows which IAM identity to map:
+
+```bash
+kubectl annotate serviceaccount KSA_NAME \
+  --namespace NAMESPACE \
+  iam.gke.io/gcp-service-account=IAM_SA_NAME@PROJECT_ID.iam.gserviceaccount.com
+```
+
+If deploying with the Bifrost Helm chart, set the annotation via `serviceAccount.annotations` in your values file - see [Helm - Google Vertex AI](/deployment-guides/helm/providers#google-vertex-ai) for the full example.
+
+</Accordion>
+
+### Verify
+
+From inside the Bifrost pod, confirm the GKE metadata server returns a token:
+
+```bash
+kubectl exec -n NAMESPACE POD_NAME -- \
+  wget -qO- --header="Metadata-Flavor: Google" \
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+```
+
+Replace `NAMESPACE` and `POD_NAME` with your Bifrost namespace and any running Bifrost pod name (e.g., `bifrost-0` for a StatefulSet or use `kubectl get pods -n NAMESPACE` to find it).
+
+A JSON response with an `access_token` field confirms WIF is working. Then send a request through Bifrost to a Vertex model (e.g., `vertex/gemini-2.5-flash`) to verify end-to-end.
+
+### Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+| --- | --- | --- |
+| `"could not find default credentials"` | GKE metadata server not enabled, or Kubernetes ServiceAccount missing WIF annotation | Enable GKE metadata server on the node pool ([Step 2](#gcp-prerequisites)); verify the `iam.gke.io/gcp-service-account` annotation on the ServiceAccount ([Step 4](#gcp-prerequisites)) |
+| `403 Forbidden` from Vertex API | IAM Service Account lacks Vertex permissions | Grant `roles/aiplatform.user` to the IAM Service Account |
+| `403` during token exchange | WIF binding missing | Run the `add-iam-policy-binding` command from Step 4; confirm `roles/iam.workloadIdentityUser` is granted |
+| Wrong project or region errors | Bifrost config mismatch | Check `project_id` and `region` in the Vertex key configuration |
+
+---
+
+## AWS Workload Identity Federation
+
+When running Bifrost on AWS (EKS, ECS, EC2), [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation-with-other-clouds) lets the workload's IAM role authenticate to Vertex AI without a GCP service account key. GCP trusts your AWS account through a Workload Identity Pool **AWS provider**; Bifrost proves the workload's identity with a signed STS `GetCallerIdentity` request and receives a GCP token in return.
+
+**What you need:**
+
+1. The GCP-side prerequisites below (APIs enabled, pool and AWS provider, IAM grant)
+2. An IAM role attached to the Bifrost workload: an [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) or [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html) role on EKS, an ECS task role, or an EC2 instance profile. It needs **no** AWS permissions for this flow; `sts:GetCallerIdentity` is always allowed. Do not also set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in the pod: the SDK default chain prefers static credentials over the attached role, and the exchange would then run as that key.
+3. A Bifrost Vertex key using **"Workload Identity (AWS)"** auth - see [AWS Workload Identity Federation (EKS)](#4-aws-workload-identity-federation-eks) for Web UI, API, config.json, and Go SDK setup. For Helm, see [Helm - Google Vertex AI](/deployment-guides/helm/providers#google-vertex-ai).
+
+### GCP Prerequisites (AWS)
+
+<Accordion title="Step 1: Enable the required APIs">
+
+```bash
+gcloud services enable aiplatform.googleapis.com sts.googleapis.com iamcredentials.googleapis.com \
+  --project=PROJECT_ID
+```
+
+`sts.googleapis.com` performs the token exchange. `iamcredentials.googleapis.com` is only used when you impersonate a service account (`service_account_email`).
+
+</Accordion>
+
+<Accordion title="Step 2: Create a Workload Identity Pool and an AWS provider">
+
+```bash
+# Create the pool
+gcloud iam workload-identity-pools create POOL_ID \
+  --project=PROJECT_ID \
+  --location=global \
+  --display-name="Bifrost on AWS"
+
+# Trust your AWS account. The attribute mapping exposes the assumed role name as attribute.aws_role,
+# and the condition restricts the pool to the Bifrost role only.
+gcloud iam workload-identity-pools providers create-aws PROVIDER_ID \
+  --project=PROJECT_ID \
+  --location=global \
+  --workload-identity-pool=POOL_ID \
+  --account-id=AWS_ACCOUNT_ID \
+  --attribute-mapping="google.subject=assertion.arn,attribute.aws_role=assertion.arn.extract('assumed-role/{role}/')" \
+  --attribute-condition="attribute.aws_role == 'BIFROST_ROLE_NAME'"
+```
+
+The `audience` for the Bifrost key is the provider's full resource name:
+
+```bash
+gcloud iam workload-identity-pools providers describe PROVIDER_ID \
+  --project=PROJECT_ID --location=global --workload-identity-pool=POOL_ID \
+  --format="value(name)"
+# //iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
+```
+
+Prefix the printed `projects/...` value with `//iam.googleapis.com/` if the command omits it.
+
+</Accordion>
+
+<Accordion title="Step 3: Grant Vertex AI access">
+
+Pick one of the two models. The principal in both is the pool-scoped identity of your AWS role:
+
+```
+principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.aws_role/BIFROST_ROLE_NAME
+```
+
+**Option A - direct access (no service account).** Leave `service_account_email` empty in the Bifrost key and grant the role directly:
+
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.aws_role/BIFROST_ROLE_NAME" \
+  --role="roles/aiplatform.user"
+```
+
+**Option B - impersonate a service account.** Set `service_account_email` in the Bifrost key, give the service account Vertex access, and let the federated principal impersonate it:
+
+```bash
+gcloud iam service-accounts create IAM_SA_NAME \
+  --display-name="Bifrost Vertex AI" --project=PROJECT_ID
+
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:IAM_SA_NAME@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"
+
+gcloud iam service-accounts add-iam-policy-binding \
+  IAM_SA_NAME@PROJECT_ID.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/attribute.aws_role/BIFROST_ROLE_NAME"
+```
+
+</Accordion>
+
+<Accordion title="Step 4: Attach the IAM role to the Bifrost workload (EKS)">
+
+With IRSA, annotate the Kubernetes ServiceAccount and let the EKS webhook inject the web identity token:
+
+```bash
+kubectl annotate serviceaccount KSA_NAME \
+  --namespace NAMESPACE \
+  eks.amazonaws.com/role-arn=arn:aws:iam::AWS_ACCOUNT_ID:role/BIFROST_ROLE_NAME
+```
+
+With EKS Pod Identity, two prerequisites come first. The cluster needs the Pod Identity Agent add-on, which is what actually hands credentials to the pod:
+
+```bash
+aws eks create-addon --cluster-name CLUSTER_NAME --addon-name eks-pod-identity-agent
+```
+
+And the IAM role's trust policy must let the EKS Pod Identity service assume it and tag the session (an IRSA-style OIDC trust policy does not work here):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "pods.eks.amazonaws.com" },
+      "Action": ["sts:AssumeRole", "sts:TagSession"]
+    }
+  ]
+}
+```
+
+Then create the association:
+
+```bash
+aws eks create-pod-identity-association \
+  --cluster-name CLUSTER_NAME \
+  --namespace NAMESPACE \
+  --service-account KSA_NAME \
+  --role-arn arn:aws:iam::AWS_ACCOUNT_ID:role/BIFROST_ROLE_NAME
+```
+
+Either way the pod receives a credentials source the AWS SDK default chain understands. A region is not guaranteed: IRSA on EKS usually injects `AWS_REGION`, but a self-managed webhook may not, and Pod Identity does not set one. If neither the environment nor instance metadata provides a region, set `aws_region` in the key or `AWS_REGION` in the pod. If deploying with the Bifrost Helm chart, set the annotation via `serviceAccount.annotations` - see [Helm - Google Vertex AI](/deployment-guides/helm/providers#google-vertex-ai).
+
+</Accordion>
+
+### Verify (AWS)
+
+From inside the Bifrost pod, confirm the AWS identity is the expected role:
+
+```bash
+kubectl exec -n NAMESPACE POD_NAME -- aws sts get-caller-identity
+# "Arn": "arn:aws:sts::AWS_ACCOUNT_ID:assumed-role/BIFROST_ROLE_NAME/..."
+```
+
+Then send a request through Bifrost to a Vertex model (e.g., `vertex/gemini-2.5-flash`). In GCP, the Cloud Audit Log entry for the Vertex call identifies the caller under `protoPayload.authenticationInfo`. With direct access and the `google.subject=assertion.arn` mapping above, `principalSubject` is `principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/subject/arn:aws:sts::AWS_ACCOUNT_ID:assumed-role/BIFROST_ROLE_NAME/SESSION`. With impersonation, `principalEmail` is the service account email and the federated AWS identity appears as `principalSubject` inside `serviceAccountDelegationInfo[]`. The `principalSet://.../attribute.aws_role/...` form from Step 3 is the IAM binding target and does not appear as the logged identity.
+
+### Troubleshooting (AWS)
+
+| Symptom | Likely Cause | Fix |
+| --- | --- | --- |
+| `aws credentials: ... no EC2 IMDS role found` or `failed to refresh cached credentials` | No IAM role reaches the pod | Check the IRSA annotation or the Pod Identity association ([Step 4](#gcp-prerequisites-aws)); `aws sts get-caller-identity` inside the pod must succeed |
+| `aws region could not be determined` | Neither `AWS_REGION` nor instance metadata is available | Set `aws_region` in the key, or `AWS_REGION` in the pod environment |
+| `invalid_grant` / `The audience in the token does not match` during the exchange | Wrong `audience` | Copy the provider resource name exactly ([Step 2](#gcp-prerequisites-aws)); it starts with `//iam.googleapis.com/` |
+| `The given credential is rejected by the attribute condition` | The AWS role name does not match the provider condition | Align `--attribute-condition` with the role attached to the pod |
+| `403 Permission 'iam.serviceAccounts.getAccessToken' denied` | Missing impersonation grant | Run the `add-iam-policy-binding ... roles/iam.workloadIdentityUser` command from [Step 3](#gcp-prerequisites-aws), Option B |
+| `403 Forbidden` from Vertex API | The principal or service account lacks Vertex permissions | Grant `roles/aiplatform.user` per [Step 3](#gcp-prerequisites-aws) |
+| Requests succeed but as the **node** role (Bifrost older than this feature) | An `external_account` JSON with `"environment_id": "aws1"` was resolved by Google's library, which reads instance metadata | Upgrade; current Bifrost resolves that JSON through the AWS SDK chain, or switch the key to `aws_workload_identity` |
+
+---
+
+## Beta Headers
+
+For Anthropic models on Vertex AI, Bifrost validates `anthropic-beta` headers and drops unsupported headers from the request.
+
+**Supported**: `computer-use-*`, `compact-*`, `context-management-*`, `interleaved-thinking-*`, `context-1m-*`
+
+**Not supported**: `structured-outputs-*`, `advanced-tool-use-*`, `mcp-client-*`, `prompt-caching-scope-*`, `files-api-*`, `skills-*`, `fast-mode-*`, `redact-thinking-*`
+
+You can override these defaults per provider via the **Beta Headers** tab in provider configuration or via [`beta_header_overrides`](/quickstart/gateway/provider-configuration#beta-header-overrides). See the full support matrix in the [Anthropic provider docs](/providers/supported-providers/anthropic#beta-headers).
+
+<Frame>
+  <img
+    src="/media/vertex-ai-setting-anthropic-beta-headers.png"
+    alt="Vertex AI Beta Headers configuration tab showing supported and unsupported Anthropic beta features with override options"
+  />
+</Frame>
+
+---
+
+# 1. Chat Completions
+
+## Request Parameters
+
+### Core Parameter Mapping
+
+| Parameter        | Vertex Handling           | Notes                                                |
+| ---------------- | ------------------------- | ---------------------------------------------------- |
+| `model`          | Maps to Vertex model ID   | Region-specific endpoint constructed automatically   |
+| All other params | Model-specific conversion | Converted per underlying provider (Gemini/Anthropic) |
+
+### Key Configuration
+
+The key configuration for Vertex requires Google Cloud credentials:
+
+```json
+{
+  "vertex_key_config": {
+    "project_id": "my-gcp-project",
+    "region": "us-central1",
+    "auth_credentials": "{service-account-json}"
+  }
+}
+```
+
+**Configuration Details**:
+
+- `project_id` - GCP project ID (required)
+- `region` - GCP region for API endpoints (required)
+  - Examples: `us-central1`, `us-west1`, `eu-west1`, `global`
+- `auth_credentials` - Service account JSON credentials (optional if using default credentials)
+- `aws_workload_identity` - AWS → GCP Workload Identity Federation block; takes precedence over `auth_credentials` (see [section 4](#4-aws-workload-identity-federation-eks))
+
+### Authentication Methods
+
+1. **Service Account JSON** (recommended for production)
+
+   ```json
+   { "auth_credentials": "{full-service-account-json}" }
+   ```
+
+2. **Application Default Credentials** (for local development)
+   - Requires `GOOGLE_APPLICATION_CREDENTIALS` environment variable
+   - Leave `auth_credentials` empty
+
+3. **AWS Workload Identity Federation** (Bifrost running on AWS)
+
+   ```json
+   { "aws_workload_identity": { "audience": "//iam.googleapis.com/projects/.../providers/aws" } }
+   ```
+
+## Gemini Models
+
+When using Google's Gemini models, Bifrost converts requests to Gemini's API format.
+
+### Parameter Mapping for Gemini
+
+All Gemini-compatible parameters are supported. Special handling includes:
+
+- **System prompts**: Converted to Gemini's system message format
+- **Tool usage**: Mapped to Gemini's function calling format
+- **Streaming**: Uses Gemini's streaming protocol
+
+Refer to [Gemini documentation](/providers/supported-providers/gemini) for detailed conversion details.
+
+## Anthropic Models (Claude)
+
+When using Anthropic models through Vertex AI, Bifrost converts requests to Anthropic's message format.
+
+### Parameter Mapping for Anthropic
+
+All Anthropic-standard parameters are supported:
+
+- **Reasoning/Thinking**: `reasoning` parameters converted to `thinking` structure
+- **System messages**: Extracted and placed in separate `system` field
+- **Tool message grouping**: Consecutive tool messages merged
+- **API version**: Automatically set to `vertex-2023-10-16` for Anthropic models
+
+Refer to [Anthropic documentation](/providers/supported-providers/anthropic) for detailed conversion details.
+
+### Special Notes for Vertex + Anthropic
+
+- Responses API uses special `/v1/messages` endpoint
+- `anthropic_version` automatically set to `vertex-2023-10-16`
+- Minimum reasoning budget: 1024 tokens
+- Model field removed from request (Vertex uses different identification)
+- `prompt_cache.auto_inject` applies to **Claude models only**. Vertex serves Claude and
+  Gemini side by side, and only Claude takes a per-block cache marker; Gemini caches
+  through a `cachedContent` resource instead, so injection is a no-op there. See
+  [Prompt caching](/features/prompt-caching).
+
+## Region Selection
+
+The region determines the API endpoint:
+
+| Region        | Endpoint                                | Purpose                   |
+| ------------- | --------------------------------------- | ------------------------- |
+| `us-central1` | `us-central1-aiplatform.googleapis.com` | US Central                |
+| `us-west1`    | `us-west1-aiplatform.googleapis.com`    | US West                   |
+| `eu-west1`    | `eu-west1-aiplatform.googleapis.com`    | Europe West               |
+| `global`      | `aiplatform.googleapis.com`             | Global (no region prefix) |
+
+Availability varies by region. Check [GCP documentation](https://cloud.google.com/vertex-ai/docs/general/locations) for model availability.
+
+### Multi-region-only models
+
+Some models (e.g. Claude Opus 4.7/4.8) are published only on Google's multi-region pool endpoints. When such a model is requested with a single US or Europe region, Bifrost automatically promotes the call to the matching pool endpoint (`aiplatform.us.rep.googleapis.com` / `aiplatform.eu.rep.googleapis.com`) and rewrites the `locations/` path segment to `us` / `eu`. Set `force_single_region: true` on the Vertex key (or per-deployment) to disable this and keep the exact region you configured — for example when you serve these models from a single region via provisioned throughput. Endpoint rewrites are emitted at `debug` log level.
+
+## Streaming
+
+Streaming format depends on model type:
+
+- **Gemini models**: Standard Gemini streaming with server-sent events
+- **Anthropic models**: Anthropic message streaming format
+
+---
+
+# 2. Responses API
+
+The Responses API is available for both Anthropic (Claude) and Gemini models on Vertex AI.
+
+## Request Parameters
+
+### Core Parameter Mapping
+
+| Parameter           | Vertex Handling              | Notes                             |
+| ------------------- | ---------------------------- | --------------------------------- |
+| `instructions`      | Becomes system message       | Model-specific conversion         |
+| `input`             | Converted to messages        | String or array support           |
+| `max_output_tokens` | Model-specific field mapping | Gemini vs Anthropic conversion    |
+| All other params    | Model-specific conversion    | Converted per underlying provider |
+
+### Gemini Models
+
+For Gemini models, conversion follows Gemini's Responses API format.
+
+### Anthropic Models (Claude)
+
+For Anthropic models, conversion follows Anthropic's message format:
+
+- `instructions` becomes system message
+- `reasoning` mapped to `thinking` structure
+
+### Configuration
+
+<Tabs>
+<Tab title="Gateway">
+
+```bash
+curl -X POST http://localhost:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "vertex/claude-3-5-sonnet",
+    "input": "What is AI?",
+    "instructions": "You are a helpful assistant",
+    "project_id": "my-gcp-project",
+    "region": "us-central1"
+  }' \
+  -H "X-Goog-Authorization: Bearer {token}"
+```
+
+</Tab>
+<Tab title="Go SDK">
+
+```go
+resp, err := client.ResponsesRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostResponsesRequest{
+    Provider: schemas.Vertex,
+    Model:    "claude-3-5-sonnet",
+    Input:    messages,
+    Params: &schemas.ResponsesParameters{
+        Instructions: schemas.Ptr("You are a helpful assistant"),
+    },
+})
+```
+
+</Tab>
+</Tabs>
+
+### Special Handling
+
+- Endpoint: `/v1/messages` (Anthropic format)
+- `anthropic_version` set to `vertex-2023-10-16` automatically
+- Model and region fields removed from request
+- Raw request body passthrough supported
+
+Refer to [Anthropic Responses API](/providers/supported-providers/anthropic#2-responses-api) for parameter details.
+
+---
+
+# 3. Embeddings
+
+Embeddings are supported for Gemini and other models that support embedding generation.
+
+## Request Parameters
+
+### Core Parameters
+
+| Parameter    | Vertex Mapping                    | Notes                |
+| ------------ | --------------------------------- | -------------------- |
+| `input`      | `instances[].content`             | Text to embed        |
+| `dimensions` | `parameters.outputDimensionality` | Optional output size |
+
+### Advanced Parameters
+
+Use `extra_params` for embedding-specific options:
+
+<Tabs>
+<Tab title="Gateway">
+
+```bash
+curl -X POST http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "text-embedding-004",
+    "input": ["text to embed"],
+    "dimensions": 256,
+    "task_type": "RETRIEVAL_DOCUMENT",
+    "title": "Document title",
+    "project_id": "my-gcp-project",
+    "region": "us-central1",
+    "autoTruncate": true
+  }'
+```
+
+</Tab>
+<Tab title="Go SDK">
+
+```go
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Vertex,
+    Model:    "text-embedding-004",
+    Input: []schemas.EmbeddingInputItem{
+        {Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: schemas.Ptr("text to embed")}}},
+    },
+    Params: &schemas.EmbeddingParameters{
+        Dimensions: schemas.Ptr(256),
+        ExtraParams: map[string]interface{}{
+            "task_type": "RETRIEVAL_DOCUMENT",
+            "title": "Document title",
+            "autoTruncate": true,
+        },
+    },
+})
+```
+
+</Tab>
+</Tabs>
+
+#### Embedding Parameters
+
+| Parameter      | Type    | Description                                                                                                               |
+| -------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `task_type`    | string  | Task type hint: `RETRIEVAL_QUERY`, `RETRIEVAL_DOCUMENT`, `SEMANTIC_SIMILARITY`, `CLASSIFICATION`, `CLUSTERING` (optional) |
+| `title`        | string  | Optional title to help model produce better embeddings (used with task_type)                                              |
+| `autoTruncate` | boolean | Auto-truncate input to max tokens (defaults to true)                                                                      |
+
+### Task Type Effects
+
+Different task types optimize embeddings for specific use cases:
+
+- `RETRIEVAL_DOCUMENT` - Optimized for documents in retrieval systems
+- `RETRIEVAL_QUERY` - Optimized for queries searching documents
+- `SEMANTIC_SIMILARITY` - Optimized for semantic similarity tasks
+- `CLASSIFICATION` - For classification tasks
+- `CLUSTERING` - For clustering tasks
+
+## Response Conversion
+
+Embeddings response includes vectors and truncation information:
+
+```json
+{
+  "embeddings": [
+    {
+      "values": [0.1234, -0.5678, ...],
+      "statistics": {
+        "token_count": 15,
+        "truncated": false
+      }
+    }
+  ]
+}
+```
+
+**Response Fields**:
+
+- `values` - Embedding vector as floats
+- `statistics.token_count` - Input token count
+- `statistics.truncated` - Whether input was truncated due to length
+
+---
+
+# 4. Image Generation
+
+Image Generation is supported for Gemini and Imagen on Vertex AI. The provider automatically routes to the appropriate format based on the model type.
+
+## Request Parameters
+
+### Core Parameter Mapping
+
+| Parameter        | Vertex Handling                       | Notes                                             |
+| ---------------- | ------------------------------------- | ------------------------------------------------- |
+| `model`          | Mapped to deployment/model identifier | Model type detected automatically                 |
+| `prompt`         | Model-specific conversion             | Converted per underlying provider (Gemini/Imagen) |
+| All other params | Model-specific conversion             | Converted per underlying provider                 |
+
+### Model Type Detection
+
+Vertex automatically detects the model type and uses the appropriate conversion:
+
+1. **Gemini Models**: Uses Gemini format (same as [Gemini Image Generation](/providers/supported-providers/gemini#8-image-generation))
+2. **Imagen Models**: Uses Imagen format (detected via `IsImagenModel()`)
+
+### Configuration
+
+<Tabs>
+<Tab title="Gateway">
+
+```bash
+curl -X POST http://localhost:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "vertex/imagen-4.0-generate-001",
+    "prompt": "A sunset over the mountains",
+    "size": "1024x1024",
+    "n": 2,
+    "project_id": "my-gcp-project",
+    "region": "us-central1"
+  }' \
+  -H "X-Goog-Authorization: Bearer {token}"
+```
+
+</Tab>
+<Tab title="Go SDK">
+
+```go
+resp, err := client.ImageGenerationRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostImageGenerationRequest{
+    Provider: schemas.Vertex,
+    Model:    "imagen-4.0-generate-001",
+    Input: &schemas.ImageGenerationInput{
+        Prompt: "A sunset over the mountains",
+    },
+    Params: &schemas.ImageGenerationParameters{
+        Size: schemas.Ptr("1024x1024"),
+        N:    schemas.Ptr(2),
+    },
+})
+```
+
+</Tab>
+</Tabs>
+
+## Request Conversion
+
+Vertex converts requests based on model type:
+
+- **Gemini Models**: Uses `gemini.ToGeminiImageGenerationRequest()` - same conversion as standard Gemini (see [Gemini Image Generation](/providers/supported-providers/gemini#8-image-generation))
+- **Imagen Models**: Uses `gemini.ToImagenImageGenerationRequest()` - Imagen-specific format with size/aspect ratio conversion
+
+All request bodies are converted to `map[string]interface{}` and the `region` field is removed before sending to Vertex API.
+
+## Response Conversion
+
+- **Gemini Models**: Responses converted using `GenerateContentResponse.ToBifrostImageGenerationResponse()` - same as standard Gemini
+- **Imagen Models**: Responses converted using `GeminiImagenResponse.ToBifrostImageGenerationResponse()` - Imagen-specific format
+
+## Endpoint Selection
+
+The provider automatically selects the endpoint based on model type:
+
+- **Fine-tuned models**: `/v1beta1/projects/{projectNumber}/locations/{region}/endpoints/{deployment}:generateContent`
+- **Imagen models**: `/v1/projects/{projectID}/locations/{region}/publishers/google/models/{model}:predict`
+- **Gemini models**: `/v1/projects/{projectID}/locations/{region}/publishers/google/models/{model}:generateContent`
+
+## Streaming
+
+Image generation streaming is not supported by Vertex AI.
+
+---
+
+# 5. Image Edit
+
+<Warning>Requests use **multipart/form-data**, not JSON.</Warning>
+
+Image Edit is supported for Gemini and Imagen models on Vertex AI. The provider automatically routes to the appropriate format based on the model type.
+
+**Request Parameters**
+
+| Parameter            | Type   | Required | Notes                                                                                                                                                           |
+| -------------------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`              | string | ✅       | Model identifier (must be Gemini or Imagen model)                                                                                                               |
+| `prompt`             | string | ✅       | Text description of the edit                                                                                                                                    |
+| `image[]`            | binary | ✅       | Image file(s) to edit (supports multiple images)                                                                                                                |
+| `mask`               | binary | ❌       | Mask image file                                                                                                                                                 |
+| `type`               | string | ❌       | Edit type: `"inpainting"`, `"outpainting"`, `"inpaint_removal"`, `"bgswap"` (Imagen only)                                                                       |
+| `n`                  | int    | ❌       | Number of images to generate (1-10)                                                                                                                             |
+| `output_format`      | string | ❌       | Output format: `"png"`, `"webp"`, `"jpeg"`                                                                                                                      |
+| `output_compression` | int    | ❌       | Compression level (0-100%)                                                                                                                                      |
+| `seed`               | int    | ❌       | Seed for reproducibility (via `ExtraParams["seed"]`)                                                                                                            |
+| `negative_prompt`    | string | ❌       | Negative prompt (via `ExtraParams["negativePrompt"]`)                                                                                                           |
+| `maskMode`           | string | ❌       | Mask mode (via `ExtraParams["maskMode"]`, Imagen only): `"MASK_MODE_USER_PROVIDED"`, `"MASK_MODE_BACKGROUND"`, `"MASK_MODE_FOREGROUND"`, `"MASK_MODE_SEMANTIC"` |
+| `dilation`           | float  | ❌       | Mask dilation (via `ExtraParams["dilation"]`, Imagen only): Range [0, 1]                                                                                        |
+| `maskClasses`        | int[]  | ❌       | Mask classes (via `ExtraParams["maskClasses"]`, Imagen only): For `MASK_MODE_SEMANTIC`                                                                          |
+
+---
+
+**Request Conversion**
+
+Vertex uses the same conversion functions as Gemini:
+
+1. **Gemini Models**: Uses `gemini.ToGeminiImageEditRequest()` - same conversion as standard Gemini (see [Gemini Image Edit](/providers/supported-providers/gemini#9-image-edit))
+2. **Imagen Models**: Uses `gemini.ToImagenImageEditRequest()` - Imagen-specific format with edit mode mapping and mask configuration (see [Gemini Image Edit](/providers/supported-providers/gemini#9-image-edit))
+
+**Model Validation**: Only Gemini and Imagen models are supported. Other models return `ConfigurationError`.
+
+**Request Body Processing**:
+
+- All request bodies are converted to `map[string]interface{}` for Vertex API compatibility
+- The `region` field is removed before sending to Vertex API
+- For Gemini models, unsupported fields are stripped via `stripVertexGeminiUnsupportedFields()` (removes `id` from function_call and function_response)
+
+**Response Conversion**
+
+- **Gemini Models**: Responses converted using `GenerateContentResponse.ToBifrostImageGenerationResponse()` - same as standard Gemini
+- **Imagen Models**: Responses converted using `GeminiImagenResponse.ToBifrostImageGenerationResponse()` - Imagen-specific format
+
+**Endpoint Selection**
+
+The provider automatically selects the endpoint based on model type:
+
+- **Gemini models**: `/v1/projects/{projectID}/locations/{region}/publishers/google/models/{model}:generateContent`
+- **Imagen models**: `/v1/projects/{projectID}/locations/{region}/publishers/google/models/{model}:predict`
+
+**Streaming**
+
+Image edit streaming is not supported by Vertex AI.
+
+**Image Variation**
+
+Image variation is not supported by Vertex AI.
+
+---
+
+# 6. List Models
+
+## Request Parameters
+
+None required. The key's `region` picks the Model Garden host (`aiplatform.googleapis.com` for `global` and multi-region endpoints, `{region}-aiplatform.googleapis.com` otherwise).
+
+## How Models Are Listed
+
+What `GET /v1/models?provider=vertex` returns for a key depends on how the key authenticates, because Vertex's Model Garden listing (`publishers.models.list`) accepts only OAuth credentials and rejects API keys.
+
+### Keys with OAuth Credentials
+
+A key with a service account (`auth_credentials`), AWS workload identity, or no credentials at all (Application Default Credentials) lists the Model Garden catalog for the `google`, `anthropic` and `mistralai` publishers, every page, and then:
+
+1. Keeps the catalog models the key's `models` allowlist allows. `["*"]` keeps all of them, and a `regex:` entry such as `"regex:^gemini-.*$"` keeps every catalog model it matches.
+2. Adds the key's `aliases` that the allowlist allows, with the alias target in the model's `alias` field. Fine-tuned endpoints and model IDs the catalog does not list appear this way.
+3. Adds the exact `models` entries the catalog did not return.
+4. Drops everything `blacklisted_models` blocks.
+
+Publishers that are not available in the key's region are skipped.
+
+### Keys with Only an API Key
+
+An API key cannot list Model Garden, so a key with an API key and no OAuth credentials lists its own configuration without calling Vertex: the `aliases` its allowlist allows, and its exact `models` entries. A `regex:` entry lists no catalog models for such a key, although requests to the models it matches still work.
+
+The one exception is a key with `models: ["*"]` and no aliases, which calls Model Garden with the gateway host's Application Default Credentials and fails if the host has none.
+
+<Note>
+  Model Garden lists one entry per model, not every model ID Vertex accepts. A
+  model ID that works for requests but is not in the catalog, such as a dated or
+  preview version, is listed only when it is an exact `models` entry or an alias.
+</Note>
+
+### Example Configuration
+
+<Tabs>
+<Tab title="Catalog by Pattern">
+
+```json
+{
+  "models": ["regex:^gemini-.*$"],
+  "vertex_key_config": {
+    "project_id": "my-project",
+    "region": "us-central1",
+    "auth_credentials": "env.VERTEX_CREDENTIALS"
+  }
+}
+```
+
+Lists every Gemini model in the Model Garden catalog.
+
+</Tab>
+<Tab title="All Models Plus a Fine-Tuned Endpoint">
+
+```json
+{
+  "models": ["*"],
+  "aliases": {
+    "my-gemini-ft": { "model_id": "1234567890" }
+  },
+  "vertex_key_config": {
+    "project_id": "my-project",
+    "region": "us-central1",
+    "auth_credentials": "env.VERTEX_CREDENTIALS"
+  }
+}
+```
+
+Lists the whole catalog plus `my-gemini-ft`, whose `alias` is `1234567890`.
+
+</Tab>
+<Tab title="API Key">
+
+```json
+{
+  "value": "env.VERTEX_API_KEY",
+  "models": ["gemini-2.5-flash", "regex:^claude-.*"],
+  "aliases": {
+    "claude-fast": { "model_id": "claude-haiku-4-5" }
+  },
+  "vertex_key_config": {
+    "project_id": "my-project",
+    "region": "us-central1"
+  }
+}
+```
+
+Lists `gemini-2.5-flash` and `claude-fast`. The `regex:^claude-.*` entry lists no other Claude models, but requests to any `claude-` model are allowed.
+
+</Tab>
+</Tabs>
+
+### Pagination
+
+Bifrost reads every Model Garden page before filtering, and applies `page_size` and `page_token` to the combined list.
+
+---
+
+## Caveats
+
+<Accordion title="Project ID and Region Required">
+  **Severity**: High **Behavior**: Both project_id and region required for all
+  operations **Impact**: Request fails without valid GCP project/region
+  configuration **Code**: `vertex.go:127-138`
+</Accordion>
+
+<Accordion title="OAuth2 Token Management">
+  **Severity**: Medium **Behavior**: Tokens cached and automatically refreshed
+  when expired **Impact**: First request slightly slower due to auth; cached for
+  subsequent requests **Code**: `vertex.go:34-55`
+</Accordion>
+
+<Accordion title="Anthropic Model Detection">
+  **Severity**: Medium **Behavior**: Automatic detection of Anthropic vs Gemini
+  models **Impact**: Different conversion logic applied transparently **Code**:
+  `vertex.go` chat/responses endpoints
+</Accordion>
+
+<Accordion title="Model-Specific Responses API Handling">
+  **Severity**: Low **Behavior**: Responses API automatically routes to
+  Anthropic or Gemini implementation based on model **Impact**: Different
+  conversion logic applied transparently per model **Code**:
+  `vertex.go:836-1080`
+</Accordion>
+
+<Accordion title="Anthropic Version Lock">
+  **Severity**: Low **Behavior**: `anthropic_version` always set to
+  `vertex-2023-10-16` for Claude **Impact**: Cannot override Anthropic version
+  for Claude on Vertex **Code**: `utils.go:33, 71`
+</Accordion>
+
+<Accordion title="Embeddings Precision Preservation">
+  **Severity**: Low **Behavior**: Vertex returns float64 embeddings, and Bifrost
+  preserves that precision in normalized embedding responses **Impact**: No
+  precision loss in the `/v1/embeddings` response path **Code**:
+  `embedding.go:84-91`
+</Accordion>
+
+<Accordion title="List Models Needs OAuth Credentials">
+  **Severity**: Medium **Behavior**: Model Garden listing rejects API keys
+  **Impact**: A key with only an API key lists its aliases and exact `models`
+  entries, so its `regex:` entries list no catalog models **Code**:
+  `vertex.go` `listModelsByKey`
+</Accordion>
+
+---
+
+## Configuration
+
+**HTTP Settings**: OAuth2 authentication with automatic token refresh | Region-specific endpoints | Max Connections 5000 | Max Idle 60 seconds
+
+**Scope**: `https://www.googleapis.com/auth/cloud-platform`
+
+**Endpoint Format**: `https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/{resource}`
+
+**Note**: For `global` region, endpoint is `https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/{resource}`
+
+## Video Generation
+
+Vertex AI routes video generation through Gemini's Veo models using the `predictLongRunning` endpoint. All parameters are identical to [Gemini Video Generation](/providers/supported-providers/gemini#video-generation).
+
+<Note>
+  Only Veo models are supported (e.g., `veo-2.0-generate-001`). Passing a
+  non-Veo model name returns a configuration error.
+</Note>
+
+**Supported Operations**
+
+| Operation | Supported | Notes                         |
+| --------- | --------- | ----------------------------- |
+| Generate  | ✅        | `POST /v1/videos`             |
+| Retrieve  | ✅        | `GET /v1/videos/{id}`         |
+| Download  | ✅        | `GET /v1/videos/{id}/content` |
+| Delete    | ❌        | Not supported                 |
+| List      | ❌        | Not supported                 |
+| Remix     | ❌        | Not supported                 |

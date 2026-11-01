@@ -1,0 +1,395 @@
+# Audit Logs API schemas
+
+AuditEventType:
+  type: string
+  description: Classifies the audit event.
+  enum: [activity, monitor, control]
+
+AuditAction:
+  type: string
+  description: The CADF action performed.
+  enum:
+    - create
+    - read
+    - update
+    - delete
+    - authenticate
+    - authorize
+    - access
+    - enable
+    - disable
+    - start
+    - stop
+    - backup
+    - restore
+    - export
+    - import
+
+AuditOutcome:
+  type: string
+  description: The CADF outcome of the action.
+  enum: [success, failure, pending]
+
+AuditResourceType:
+  type: string
+  description: The type of resource involved in an audit event (initiator or target).
+  enum:
+    - user
+    - api_key
+    - system
+    - provider
+    - virtual_key
+    - team
+    - customer
+    - role
+    - permission
+    - guardrail
+    - mcp_client
+    - mcp_tool_group
+    - plugin
+    - config
+    - session
+    - inference
+
+AuditSeverity:
+  type: string
+  description: |
+    How sensitive the action is. `info` for routine changes, `high` for admin
+    actions with a large blast radius, such as role assignment or API key
+    creation.
+  enum: [info, high]
+
+AuditAuthMethod:
+  type: string
+  description: How the initiator authenticated.
+  enum: [sso_login, sso_session, idp_token, auth_proxy, agent_token, api_key]
+
+AuditFieldChange:
+  type: object
+  description: |
+    One field that differs between the before and after state of the target.
+    Secret fields have `redacted: true` and carry no `old` or `new` value.
+  properties:
+    path:
+      type: string
+      description: Dotted path of the field (e.g., "budget.max_limit", "keys[0].value").
+    old:
+      description: Value before the change. Omitted for created fields and redacted fields.
+    new:
+      description: Value after the change. Omitted for deleted fields and redacted fields.
+    redacted:
+      type: boolean
+      description: True when the field holds a secret. The diff records that it changed, never its value.
+  required:
+    - path
+
+AuditChangeSet:
+  type: object
+  description: |
+    Before/after diff of the target. Capped at 200 fields and 16 KB; a larger
+    diff is cut short and has `truncated: true`.
+  properties:
+    fields:
+      type: array
+      items:
+        $ref: '#/AuditFieldChange'
+    truncated:
+      type: boolean
+      description: True when the diff was cut at the field or size cap.
+  required:
+    - fields
+
+AuditResource:
+  type: object
+  description: A CADF resource (initiator, target, or observer).
+  properties:
+    id:
+      type: string
+      description: Unique identifier of the resource.
+    typeURI:
+      type: string
+      description: Resource type URI (e.g., "bifrost/user", "bifrost/api_key").
+    name:
+      type: string
+      description: Human-readable name of the resource.
+    host:
+      type: string
+      description: Hostname or IP address associated with the resource.
+  required:
+    - id
+    - typeURI
+
+AuditReason:
+  type: object
+  description: The CADF reason for an outcome (especially for failures).
+  properties:
+    reasonCode:
+      type: string
+      description: Machine-readable code (e.g., "401", "FORBIDDEN").
+    reasonType:
+      type: string
+      description: Category of reason (e.g., "HTTP", "policy").
+    message:
+      type: string
+      description: Human-readable description.
+
+AuditAttachment:
+  type: object
+  description: Additional CADF data attached to an event.
+  properties:
+    name:
+      type: string
+      description: Identifies the attachment.
+    contentType:
+      type: string
+      description: MIME type of the content.
+    content:
+      type: string
+      description: Attachment data (typically a JSON string).
+  required:
+    - name
+    - contentType
+    - content
+
+AuditEvent:
+  type: object
+  description: A CADF-compliant audit event.
+  properties:
+    id:
+      type: string
+      description: Unique identifier for this event (UUID).
+    typeURI:
+      type: string
+      description: Event type URI (e.g., "https://getbifrost.ai/schemas/auditlog.json").
+    eventType:
+      $ref: '#/AuditEventType'
+    eventTime:
+      type: string
+      format: date-time
+      description: When the event occurred (RFC 3339).
+    eventName:
+      type: string
+      description: |
+        Named event in the form `<resource>.<verb>`, such as
+        `virtual_key.updated`, `user.role_assigned` or `audit.settings_changed`.
+      example: virtual_key.updated
+    action:
+      $ref: '#/AuditAction'
+    outcome:
+      $ref: '#/AuditOutcome'
+    severity:
+      $ref: '#/AuditSeverity'
+    initiator:
+      $ref: '#/AuditResource'
+    target:
+      $ref: '#/AuditResource'
+    observer:
+      $ref: '#/AuditResource'
+    reason:
+      $ref: '#/AuditReason'
+    attachments:
+      type: array
+      items:
+        $ref: '#/AuditAttachment'
+    changes:
+      allOf:
+        - $ref: '#/AuditChangeSet'
+      description: |
+        Before/after diff of the target, with secrets redacted. Omitted from
+        list responses; returned by get-by-id and in exports.
+    tags:
+      type: array
+      description: Searchable labels for categorization.
+      items:
+        type: string
+    requestMethod:
+      type: string
+      description: HTTP method (GET, POST, etc.).
+    requestPath:
+      type: string
+      description: HTTP request path.
+    requestIP:
+      type: string
+      description: Client IP address.
+    userAgent:
+      type: string
+      description: HTTP User-Agent header.
+    requestID:
+      type: string
+      description: |
+        The request's `X-Request-ID`. Bifrost keeps a caller-supplied value of
+        up to 128 characters and generates one otherwise.
+    sessionID:
+      type: string
+      description: |
+        One-way hash of the initiator's dashboard session. It links events from
+        one session and cannot be used as a session.
+    authMethod:
+      $ref: '#/AuditAuthMethod'
+    onBehalfOfId:
+      type: string
+      description: |
+        For API keys, the user who created the key. For system jobs, the user
+        who queued the job, when there is one.
+    duration:
+      type: integer
+      format: int64
+      description: Request duration in milliseconds.
+    signature:
+      type: string
+      description: |
+        HMAC-SHA256 signature for tamper detection. Rows written by current
+        versions use `v2:<key id>:<hex>`; older rows keep the v1 format.
+    createdAt:
+      type: string
+      format: date-time
+      description: When the record was created in the database.
+  required:
+    - id
+    - typeURI
+    - eventType
+    - eventTime
+    - action
+    - outcome
+    - initiator
+    - target
+    - observer
+    - signature
+    - createdAt
+
+AuditLogsResult:
+  type: object
+  description: A paginated result of audit logs.
+  properties:
+    audit_logs:
+      type: array
+      description: The list of audit events.
+      items:
+        $ref: '#/AuditEvent'
+    total:
+      type: integer
+      format: int64
+      description: Total count of events matching the filter.
+    page:
+      type: integer
+      description: Current page number.
+    limit:
+      type: integer
+      description: Page size.
+    total_pages:
+      type: integer
+      description: Total number of pages.
+    has_more:
+      type: boolean
+      description: Whether there are more results.
+    next_cursor:
+      type: string
+      description: Opaque cursor for the next page (cursor-based pagination).
+  required:
+    - audit_logs
+    - total
+    - page
+    - limit
+    - total_pages
+    - has_more
+
+AuditLogResponse:
+  type: object
+  description: Response wrapper for a single audit log entry.
+  properties:
+    audit_log:
+      $ref: '#/AuditEvent'
+  required:
+    - audit_log
+
+AuditFilterKeyPair:
+  type: object
+  description: An id/name pair used for initiator and target filter dropdowns.
+  properties:
+    id:
+      type: string
+    name:
+      type: string
+  required:
+    - id
+    - name
+
+AuditFilterDataResponse:
+  type: object
+  description: Distinct values available for each audit log filter dimension.
+  properties:
+    actions:
+      type: array
+      items:
+        type: string
+    outcomes:
+      type: array
+      items:
+        type: string
+    event_types:
+      type: array
+      items:
+        type: string
+    initiator_types:
+      type: array
+      items:
+        type: string
+    target_types:
+      type: array
+      items:
+        type: string
+    request_methods:
+      type: array
+      items:
+        type: string
+    initiators:
+      type: array
+      items:
+        $ref: '#/AuditFilterKeyPair'
+    targets:
+      type: array
+      items:
+        $ref: '#/AuditFilterKeyPair'
+    request_paths:
+      type: array
+      items:
+        type: string
+    request_ips:
+      type: array
+      items:
+        type: string
+    tags:
+      type: array
+      items:
+        type: string
+    severities:
+      type: array
+      items:
+        type: string
+    event_names:
+      type: array
+      items:
+        type: string
+
+AuditVerifyResult:
+  type: object
+  description: |
+    The result of an audit log signature check. The expected signature is never
+    returned, since a reader holding it could forge a matching row.
+  properties:
+    valid:
+      type: boolean
+      description: Whether the stored signature matches the one recomputed from the row.
+    algorithm:
+      type: string
+      description: Signature scheme of the row.
+      enum: [hmac-sha256-v1, hmac-sha256-v2]
+    key_id:
+      type: string
+      description: ID of the key the row was signed with (v2 rows only).
+    reason:
+      type: string
+      description: Why the check failed, for example when the signing key is no longer configured.
+  required:
+    - valid
+  additionalProperties: false

@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/OWNER/REPO/vendor.lock.schema.json",
+  "title": "Bifrost distribution vendor lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["upstream", "vendor", "distribution", "synced_at"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "version", "commit", "git_tree", "source_url", "release_url"],
+      "properties": {
+        "repository": { "type": "string", "format": "uri" },
+        "tag": { "type": "string", "pattern": "^transports/v[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z.-]+)?$" },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z.-]+)?$" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "git_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source_url": { "type": "string", "format": "uri" },
+        "release_url": { "type": "string", "format": "uri" }
+      }
+    },
+    "vendor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directory", "tree_sha256", "file_count", "excluded"],
+      "properties": {
+        "directory": { "const": "upstream" },
+        "tree_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "file_count": { "type": "integer", "minimum": 1 },
+        "excluded": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "generator"],
+      "properties": {
+        "revision": { "type": "integer", "minimum": 1 },
+        "generator": { "const": "scripts/sync_upstream.py" }
+      }
+    },
+    "synced_at": { "type": "string", "format": "date-time" }
+  }
+}

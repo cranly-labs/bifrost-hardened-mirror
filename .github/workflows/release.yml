@@ -1,0 +1,336 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verification gate
+    uses: ./.github/workflows/ci.yml
+
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    needs: verify
+    outputs:
+      release: ${{ steps.tag.outputs.release }}
+      version: ${{ steps.meta.outputs.version }}
+      distro_tag: ${{ steps.meta.outputs.distro_tag }}
+      upstream_tag: ${{ steps.meta.outputs.upstream_tag }}
+      upstream_commit: ${{ steps.meta.outputs.upstream_commit }}
+      revision: ${{ steps.meta.outputs.revision }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      build_date: ${{ steps.meta.outputs.build_date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Derive release metadata
+        id: meta
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+
+          lock = json.load(open("vendor.lock.json", encoding="utf-8"))
+          version = lock["upstream"]["version"]
+          revision = int(lock["distribution"]["revision"])
+          distro_tag = f"v{version}" if revision == 1 else f"v{version}-distro.{revision}"
+          prerelease = "true" if "-" in version else "false"
+          build_date = subprocess.check_output(
+              ["git", "log", "-1", "--format=%cI"], text=True
+          ).strip()
+          print(f"version={version}")
+          print(f"distro_tag={distro_tag}")
+          print(f"upstream_tag={lock['upstream']['tag']}")
+          print(f"upstream_commit={lock['upstream']['commit']}")
+          print(f"revision={revision}")
+          print(f"prerelease={prerelease}")
+          print(f"build_date={build_date}")
+          PY
+
+      - name: Check whether the release already exists
+        id: tag
+        env:
+          DISTRO_TAG: ${{ steps.meta.outputs.distro_tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${DISTRO_TAG}" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release ${DISTRO_TAG} already exists; skipping. Bump distribution.revision in vendor.lock.json to publish a new artifact."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Build, scan, sign, and publish
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      ref: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Normalize image name
+        id: image
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.image.outputs.image }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.distro_tag }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+            type=sha,prefix=sha-
+          labels: |
+            com.bifrost.upstream.tag=${{ needs.prepare.outputs.upstream_tag }}
+            com.bifrost.upstream.commit=${{ needs.prepare.outputs.upstream_commit }}
+            com.bifrost.distribution.version=${{ needs.prepare.outputs.distro_tag }}
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BIFROST_VERSION=${{ needs.prepare.outputs.version }}
+            BIFROST_REVISION=${{ github.sha }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Scan published image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign image digest
+        run: cosign sign --yes "${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}"
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom/bifrost.spdx.json
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom/bifrost.spdx.json
+          retention-days: 30
+
+      - name: Release summary
+        run: |
+          {
+            echo "### Published image"
+            echo ""
+            echo "- Image: \`${{ steps.image.outputs.image }}:${{ needs.prepare.outputs.distro_tag }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Platforms: linux/amd64, linux/arm64"
+            echo "- SBOM: \`sbom/bifrost.spdx.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish GitHub release and mirrored tags
+    runs-on: ubuntu-latest
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.release == 'true'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom
+          path: sbom
+
+      - name: Create distribution and upstream anchor tags
+        env:
+          DISTRO_TAG: ${{ needs.prepare.outputs.distro_tag }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags origin
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${DISTRO_TAG}" >/dev/null 2>&1; then
+            git tag -a "${DISTRO_TAG}" -m "Bifrost distribution ${DISTRO_TAG}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${DISTRO_TAG}"
+          fi
+          ANCHOR="upstream/${UPSTREAM_TAG}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${ANCHOR}" >/dev/null 2>&1; then
+            git tag -a "${ANCHOR}" -m "Upstream ${UPSTREAM_TAG} vendored by this distribution" "${GITHUB_SHA}"
+            git push origin "refs/tags/${ANCHOR}"
+          fi
+
+      - name: Render release notes
+        env:
+          DISTRO_TAG: ${{ needs.prepare.outputs.distro_tag }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          UPSTREAM_COMMIT: ${{ needs.prepare.outputs.upstream_commit }}
+        run: |
+          python3 scripts/render_release_notes.py \
+            --version "${DISTRO_TAG}" \
+            --image "${{ needs.publish.outputs.image }}" \
+            --digest "${{ needs.publish.outputs.digest }}" \
+            --upstream-tag "${UPSTREAM_TAG}" \
+            --upstream-commit "${UPSTREAM_COMMIT}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --output /tmp/release-notes.md
+
+      - name: Create or update GitHub release
+        env:
+          DISTRO_TAG: ${{ needs.prepare.outputs.distro_tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          if gh release view "${DISTRO_TAG}" >/dev/null 2>&1; then
+            gh release edit "${DISTRO_TAG}" --title "Bifrost distribution ${DISTRO_TAG}" --notes-file /tmp/release-notes.md
+            gh release upload "${DISTRO_TAG}" sbom/bifrost.spdx.json --clobber
+          else
+            if [ "$PRERELEASE" = "true" ]; then
+              gh release create "${DISTRO_TAG}" sbom/bifrost.spdx.json \
+                --title "Bifrost distribution ${DISTRO_TAG}" \
+                --notes-file /tmp/release-notes.md \
+                --prerelease
+            else
+              gh release create "${DISTRO_TAG}" sbom/bifrost.spdx.json \
+                --title "Bifrost distribution ${DISTRO_TAG}" \
+                --notes-file /tmp/release-notes.md \
+                --latest
+            fi
+          fi
+
+  deploy:
+    name: Promote production branch and trigger Coolify
+    runs-on: ubuntu-latest
+    needs: [prepare, publish, release]
+    if: needs.prepare.outputs.release == 'true'
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Render digest-pinned production manifest
+        env:
+          DISTRO_TAG: ${{ needs.prepare.outputs.distro_tag }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          UPSTREAM_COMMIT: ${{ needs.prepare.outputs.upstream_commit }}
+        run: |
+          python3 scripts/render_production.py \
+            --image "${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}" \
+            --version "${DISTRO_TAG}" \
+            --upstream-tag "${UPSTREAM_TAG}" \
+            --upstream-commit "${UPSTREAM_COMMIT}" \
+            --output-dir dist/production
+
+      - name: Push production branch
+        env:
+          DISTRO_TAG: ${{ needs.prepare.outputs.distro_tag }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan production
+          git rm -rf . >/dev/null 2>&1 || true
+          cp dist/production/compose.yaml .
+          cp dist/production/release.json .
+          cp dist/production/README.md .
+          git add compose.yaml release.json README.md
+          git commit -m "deploy: Bifrost ${DISTRO_TAG} (${DIGEST})"
+          git push --force origin production
+
+      - name: Trigger Coolify deployment
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "${COOLIFY_WEBHOOK}" ] || [ -z "${COOLIFY_TOKEN}" ]; then
+            echo "::notice::Production branch updated. COOLIFY_WEBHOOK/COOLIFY_TOKEN are not configured, so Coolify was not triggered."
+            exit 0
+          fi
+          curl --fail --show-error --silent --request POST "${COOLIFY_WEBHOOK}" \
+            --header "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data '{"force":false}'
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "### Production promotion"
+            echo ""
+            echo "- Version: \`${{ needs.prepare.outputs.distro_tag }}\`"
+            echo "- Image: \`${{ needs.publish.outputs.image }}@${{ needs.publish.outputs.digest }}\`"
+            echo "- Branch: \`production\`"
+            echo "- Coolify: triggered when webhook secrets are configured"
+          } >> "$GITHUB_STEP_SUMMARY"

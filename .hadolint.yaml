@@ -1,0 +1,8 @@
+failure-threshold: warning
+
+ignored:
+  # Base images are pinned by digest; package updates arrive through reviewed
+  # base-image digest updates instead of floating apk version constraints.
+  - DL3018
+  # Consecutive RUN instructions are deliberate cache and layer boundaries.
+  - DL3059

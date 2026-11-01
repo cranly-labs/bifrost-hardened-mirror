@@ -1,0 +1,58 @@
+# Local development and evaluation stack.
+# Production deployments use deploy/coolify/compose.yaml.
+
+name: bifrost-local
+
+services:
+  bifrost:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BIFROST_VERSION: "${BIFROST_VERSION:-dev}"
+        BIFROST_REVISION: "${BIFROST_REVISION:-local}"
+        BUILD_DATE: "${BUILD_DATE:-unknown}"
+    image: bifrost-distribution:local
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:${BIFROST_PORT:-8080}:8080"
+
+    environment:
+      APP_PORT: "8080"
+      APP_HOST: "0.0.0.0"
+      APP_DIR: "/app/data"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      LOG_STYLE: "${LOG_STYLE:-json}"
+      BIFROST_SETUP_TOKEN: "${BIFROST_SETUP_TOKEN:-}"
+      BIFROST_ENCRYPTION_KEY: "${BIFROST_ENCRYPTION_KEY:-}"
+      GOGC: "${GOGC:-200}"
+      GOMEMLIMIT: "${GOMEMLIMIT:-1800MiB}"
+      TZ: "${TZ:-UTC}"
+
+    volumes:
+      - bifrost-data:/app/data
+
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  bifrost-data:

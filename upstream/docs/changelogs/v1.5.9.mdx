@@ -1,0 +1,415 @@
+---
+title: "v1.5.9"
+description: "v1.5.9 changelog - 2026-06-07"
+---
+<Tabs>
+  <Tab title="NPX">
+    ```bash
+    npx -y @maximhq/bifrost --transport-version v1.5.9
+    ```
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker pull maximhq/bifrost:v1.5.9
+    docker run -p 8080:8080 maximhq/bifrost:v1.5.9
+    ```
+  </Tab>
+</Tabs>
+
+<Update label="Bifrost(HTTP)" description="1.5.9">
+<Note>
+  **Private Network Access** — To connect to a provider on a private network (e.g. a local vLLM or Ollama instance), set `allow_private_network: true` in the provider's `network_config`. This allows connections to RFC 1918 ranges (`192.168.x.x`, `10.x.x.x`, `172.16.x.x`). Link-local addresses (`169.254.x.x`) remain blocked regardless of this setting. See [Provider Configuration](/quickstart/gateway/provider-configuration#private-network-access) for details.
+</Note>
+
+## ✨ Features
+
+- **OpenAI Compaction** — Added OpenAI conversation compaction support across core, framework, logging, and the API surface
+- **Multi-Customer & Org Hierarchy** — Logs and usage tracking now support multiple customers, teams, and business units, including business unit CRUD, team assignment, and governance endpoints in the OpenAPI spec
+- **Provider-Level Governance** — Budgets & limits are now scope-aware and can be applied at the virtual-key top level and per provider, wired from the model configs table, with UI filters for scope and providers
+- **Customer Budgets** — Customers support multiple budgets and `calendar_aligned` budget windows
+- **Virtual Key Attribution & Controls** — Added a `created_by` user attribution column and a `blacklisted_models` column for virtual key provider configs
+- **Request Header Capture** — OTel and Maxim observability plugins capture `request_headers` by pattern, with wildcard support (e.g. `x-custom-*`); logging gained the same wildcard header capture
+- **OTel Content Controls & Collectors** — New `disable_content_logging` option drops message/tool content from exported spans, plus support for multiple OTel collectors
+- **xAI x_search** — Added xAI `x_search` tool support
+- **URL Validation** — Added fetch URL validation with private-network configuration and link-local blocking
+- **File Scheme Pricing URLs** — Pricing source URLs now accept the `file://` scheme for air-gapped and self-hosted deployments
+- **Paginated Virtual Keys** — Virtual key fetching is paginated to handle deployments with very large numbers of keys
+- **Client IP Resolution** — Resolve client IP from `X-Forwarded-For`/`X-Real-IP` headers
+- **SCIM Provisioning** — Added `attributeType`/`attributeValue` SCIM provisioning fields
+- **Helm/Config Schema** — Added `roles` RBAC governance config and `per_user_oauth` MCP auth to the Helm chart and config schema
+- **Log Navigation UI** — Added a "View logs" menu item to customer, team, and virtual key tables, clickable links in log detail views, a customer detail sheet, and a reusable `BudgetDisplay` component
+- **Faster First Paint** — Added an inline loading shell to `#root` before React mounts
+- **Materialized View Alias** — Added an `alias` column to the materialized view with filter support
+
+## 🐞 Fixed
+
+- **Fetch URL IP Checks** — Hardened fetch URL IP checks against SSRF
+- **Mantle Model Matching** — Broadened Mantle model matching to all `gpt` variants
+- **Empty Thinking Blocks** — Strip thinking blocks when the signature is empty
+- **OpenAI Stream Usage** — Removed usage from the `responses.created` event in the OpenAI stream
+- **Prompt Cache Key** — Set the prompt cache key from the Anthropic integration
+- **Upstream Failure Status** — Map upstream connection failures to 502 instead of 400 (thanks [@chris-colinsky](https://github.com/chris-colinsky)!)
+- **Gemini Schema Constraints** — Accept numeric schema integer constraints for Gemini (thanks [@yanhao98](https://github.com/yanhao98)!)
+- **Files Provider Param** — Accept the `?provider=` query param on `GET /v1/files` (thanks [@alexef](https://github.com/alexef)!)
+- **Optional Batch Model** — Made the `model` field optional on `POST /v1/batches` (thanks [@alexef](https://github.com/alexef)!)
+- **Helm Azure Config** — Added missing `azure_key_config` fields to the Helm schema (thanks [@axelray-dev](https://github.com/axelray-dev)!)
+- **Text Completion Chunk Model** — Added the missing `Model` field to `TextCompletionChunkResponse` (thanks [@kuishou68](https://github.com/kuishou68)!)
+- **MCP Inline stdio Env** — MCP stdio server configs accept inline environment variable assignments (thanks [@Shushmitaaaa](https://github.com/Shushmitaaaa)!)
+- **Orphaned Tool Results** — Orphaned tool results in the OpenAI to Anthropic conversion flow are no longer rejected by the Anthropic API
+- **Node Usage Reconciliation** — Added a monotonic `inc_number` log cursor so node usage reconciliation does not skip late async log writes
+- **Bedrock Output Assessments** — Corrected the type of `outputAssessments` in Bedrock responses
+- **Model Pool Pricing Reloads** — Preserve non-pricing model pool entries across pricing reloads
+- **Ghost Node Reconciliation** — Replicate the VK hierarchy flow for ghost node reconciliation
+- **VK Double Usage Counting** — Fixed double usage counting when creating a virtual key
+- **Model Config Lifecycle** — Cascade deletes for model configs and removal of stale in-memory model configs
+- **FTS Index Cap** — Reduced the FTS index `left()` cap from 800k to 250k chars to stay within the tsvector limit
+- **Sync Worker Drift** — Reduced the sync worker ticker period to 5m to prevent threshold drift
+- **Passthrough** — Fixed passthrough budgets, gated passthrough models per VK, model extraction for Azure passthrough, and restricted fallbacks/provider selection to the VK boundary
+- **Provider Response Headers** — Strip provider response headers and add a content-type filter
+- **Stream Handling** — Drain non-SSE stream readers and retry stale connections
+- **Azure Claude** — Strip Azure diagnostic property for Claude models
+- **Compat max_tokens** — Preserve chat `max_tokens` during param filtering
+- **Raw Request Flag** — Removed the raw request flag from providers that don't support it
+- **UI Fixes** — Standardized page container layout, virtual key model configs UI, and dashboard chart tooltips
+
+## 🔧 Maintenance
+
+- **Dependency Upgrades** — Bumped transitive `golang.org/x` dependencies (crypto, net, sys, text) for Docker Scout CVE remediation and `recharts` to 3.8.1; cascaded version bumps across all modules
+
+
+## ⏲️ Rolling back (to 1.5.8)
+
+These are the DB queries you would need to fire if you need to rollback to v1.5.8.
+
+<AccordionGroup>
+  <Accordion title="Single node setup">
+
+```sql
+-- ============================================================
+-- STEP 1: Rollback migrate_virtual_key_governance_to_model_configs
+-- ============================================================
+
+BEGIN;
+
+-- 1A. Restore VK top-level governance (provider IS NULL rows)
+
+UPDATE governance_budgets
+SET virtual_key_id = mc.scope_id,
+    model_config_id = NULL
+FROM governance_model_configs mc
+WHERE governance_budgets.model_config_id = mc.id
+  AND mc.scope = 'virtual_key'
+  AND mc.model_name = '*'
+  AND mc.provider IS NULL
+  AND mc.scope_id IS NOT NULL;
+
+UPDATE governance_virtual_keys
+SET rate_limit_id = mc.rate_limit_id
+FROM governance_model_configs mc
+WHERE mc.scope = 'virtual_key'
+  AND mc.scope_id = governance_virtual_keys.id
+  AND mc.model_name = '*'
+  AND mc.provider IS NULL
+  AND mc.rate_limit_id IS NOT NULL;
+
+-- 1B. Restore VK per-provider governance (provider IS NOT NULL rows)
+
+UPDATE governance_budgets
+SET provider_config_id = pc.id,
+    model_config_id = NULL
+FROM governance_model_configs mc
+JOIN governance_virtual_key_provider_configs pc
+  ON pc.virtual_key_id = mc.scope_id AND pc.provider = mc.provider
+WHERE governance_budgets.model_config_id = mc.id
+  AND mc.scope = 'virtual_key'
+  AND mc.model_name = '*'
+  AND mc.provider IS NOT NULL
+  AND mc.scope_id IS NOT NULL;
+
+UPDATE governance_virtual_key_provider_configs
+SET rate_limit_id = mc.rate_limit_id
+FROM governance_model_configs mc
+WHERE mc.scope = 'virtual_key'
+  AND mc.scope_id = governance_virtual_key_provider_configs.virtual_key_id
+  AND mc.provider = governance_virtual_key_provider_configs.provider
+  AND mc.model_name = '*'
+  AND mc.rate_limit_id IS NOT NULL;
+
+-- 1C. Delete the VK-scoped wildcard model config rows
+DELETE FROM governance_model_configs
+WHERE scope = 'virtual_key'
+  AND model_name = '*';
+
+-- 1D. Remove the migration record
+DELETE FROM migrations WHERE id = 'migrate_virtual_key_governance_to_model_configs';
+
+COMMIT;
+
+-- ============================================================
+-- STEP 2: Rollback migrate_provider_governance_to_model_configs
+-- ============================================================
+
+BEGIN;
+
+UPDATE config_providers
+SET budget_id = mc.budget_id,
+    rate_limit_id = mc.rate_limit_id
+FROM governance_model_configs mc
+WHERE mc.scope = 'global'
+  AND mc.scope_id IS NULL
+  AND mc.model_name = '*'
+  AND mc.provider = config_providers.name;
+
+DELETE FROM governance_model_configs
+WHERE scope = 'global'
+  AND scope_id IS NULL
+  AND model_name = '*'
+  AND provider IS NOT NULL;
+
+DELETE FROM migrations WHERE id = 'migrate_provider_governance_to_model_configs';
+
+COMMIT;
+
+-- ============================================================
+-- STEP 3 (if needed): Rollback add_budget_model_config_id_column
+-- Only if downgrading to a version before this column existed
+-- ============================================================
+
+BEGIN;
+
+UPDATE governance_budgets SET model_config_id = NULL WHERE model_config_id IS NOT NULL;
+
+ALTER TABLE governance_budgets DROP COLUMN model_config_id;
+
+DELETE FROM migrations WHERE id = 'add_budget_model_config_id_column';
+
+COMMIT;
+```
+
+  </Accordion>
+
+  <Accordion title="Multiple nodes">
+
+```sql
+-- ============================================================
+-- PHASE 1: DUAL-WRITE — restore old FKs, keep new rows intact
+-- Safe to run while the current (new) version is serving traffic
+-- ============================================================
+
+BEGIN;
+
+-- 1A. Restore provider-level governance back to config_providers
+UPDATE config_providers
+SET budget_id = mc.budget_id,
+    rate_limit_id = mc.rate_limit_id
+FROM governance_model_configs mc
+WHERE mc.scope = 'global'
+  AND mc.scope_id IS NULL
+  AND mc.model_name = '*'
+  AND mc.provider = config_providers.name;
+
+-- 1B. Restore VK top-level budgets back to governance_virtual_keys
+--     (intentionally NOT clearing model_config_id yet — new pods still need it)
+UPDATE governance_budgets
+SET virtual_key_id = mc.scope_id
+FROM governance_model_configs mc
+WHERE governance_budgets.model_config_id = mc.id
+  AND mc.scope = 'virtual_key'
+  AND mc.model_name = '*'
+  AND mc.provider IS NULL
+  AND mc.scope_id IS NOT NULL;
+
+-- Restore VK top-level rate limits
+UPDATE governance_virtual_keys
+SET rate_limit_id = mc.rate_limit_id
+FROM governance_model_configs mc
+WHERE mc.scope = 'virtual_key'
+  AND mc.scope_id = governance_virtual_keys.id
+  AND mc.model_name = '*'
+  AND mc.provider IS NULL
+  AND mc.rate_limit_id IS NOT NULL;
+
+-- 1C. Restore VK per-provider budgets back to provider configs
+UPDATE governance_budgets
+SET provider_config_id = pc.id
+FROM governance_model_configs mc
+JOIN governance_virtual_key_provider_configs pc
+  ON pc.virtual_key_id = mc.scope_id AND pc.provider = mc.provider
+WHERE governance_budgets.model_config_id = mc.id
+  AND mc.scope = 'virtual_key'
+  AND mc.model_name = '*'
+  AND mc.provider IS NOT NULL
+  AND mc.scope_id IS NOT NULL;
+
+-- Restore VK per-provider rate limits
+UPDATE governance_virtual_key_provider_configs
+SET rate_limit_id = mc.rate_limit_id
+FROM governance_model_configs mc
+WHERE mc.scope = 'virtual_key'
+  AND mc.scope_id = governance_virtual_key_provider_configs.virtual_key_id
+  AND mc.provider = governance_virtual_key_provider_configs.provider
+  AND mc.model_name = '*'
+  AND mc.rate_limit_id IS NOT NULL;
+
+COMMIT;
+
+
+-- ============================================================
+-- PHASE 2: CLEANUP — remove new-version-only data
+-- Run ONLY after ALL pods are on the old version
+-- ============================================================
+
+BEGIN;
+
+-- Clear model_config_id from budgets (old version doesn't use it)
+UPDATE governance_budgets SET model_config_id = NULL WHERE model_config_id IS NOT NULL;
+
+-- Delete the VK-scoped wildcard model config rows
+DELETE FROM governance_model_configs
+WHERE scope = 'virtual_key'
+  AND model_name = '*';
+
+-- Delete the provider-level wildcard model config rows
+DELETE FROM governance_model_configs
+WHERE scope = 'global'
+  AND scope_id IS NULL
+  AND model_name = '*'
+  AND provider IS NOT NULL;
+
+-- Remove migration records so a future upgrade re-runs them
+DELETE FROM migrations WHERE id = 'migrate_virtual_key_governance_to_model_configs';
+DELETE FROM migrations WHERE id = 'migrate_provider_governance_to_model_configs';
+
+-- Optional: only if the old version predates the model_config_id column
+-- ALTER TABLE governance_budgets DROP COLUMN model_config_id;
+-- DELETE FROM migrations WHERE id = 'add_budget_model_config_id_column';
+
+COMMIT;
+```
+
+  </Accordion>
+</AccordionGroup>
+
+</Update>
+<Update label="Core" description="1.5.17">
+- feat: OpenAI compaction support
+- feat: multiple customers logs and usage tracking
+- feat: multiple team and business unit support in logstore
+- feat: `request_headers` pattern capture for OTel and Maxim plugins with wildcard support
+- feat: xAI `x_search` tool support
+- feat: fetch URL validation with private-network config and link-local blocking
+- feat: `file://` scheme support for pricing URLs
+- feat: filter `ListAllModels` provider fan-out by virtual key's allowed providers
+- fix: harden fetch URL IP checks against SSRF
+- fix: broaden Mantle model matching to all `gpt` variants
+- fix: strip thinking block if signature is empty
+- fix: remove usage from `responses.created` event in OpenAI stream
+- fix: set prompt cache key from Anthropic integration
+- fix: map upstream connection failures to 502 instead of 400 (thanks [@chris-colinsky](https://github.com/chris-colinsky)!)
+- fix(gemini): accept numeric schema integer constraints (thanks [@yanhao98](https://github.com/yanhao98)!)
+- fix: handle compaction message type
+- fix: OpenAI integration content string handling
+- fix: capture resolved provider from the load balancer for logging
+- fix: add content type to provider response header filter
+- fix: strip provider response headers
+- fix: drain non-SSE stream reader
+- fix: stale connection retries
+- fix: Azure diagnostic property strip for Claude models
+- fix: passthrough budgets
+- fix: bedrock outputAssessments type correction
+- fix: add Model field to TextCompletionChunkResponse (thanks [@kuishou68](https://github.com/kuishou68)!)
+- fix: accept orphaned tool results in OpenAI to Anthropic conversion flow
+- fix(mcp): allow inline stdio env assignments (thanks [@Shushmitaaaa](https://github.com/Shushmitaaaa)!)
+- chore: bumped transitive golang.org/x dependencies (crypto, net, sys, text) for Docker Scout CVE remediation
+
+</Update>
+<Update label="Framework" description="1.3.17">
+- feat: multiple customers logs and usage tracking
+- feat: multiple team and business unit support in logstore
+- feat: OpenAI compaction support
+- feat: multiple budget support for customers
+- feat: `calendar_aligned` budget support for customers
+- feat: provider-level governance for budgets & limits
+- feat: scope-aware budgets & limits wired from model configs
+- feat: `created_by` user attribution column for virtual keys
+- feat: `blacklisted_models` column for virtual key provider configs
+- feat: `alias` column in materialized view with filter support
+- feat: `request_headers` pattern capture for OTel and Maxim plugins
+- feat: paginated virtual key fetch for large key counts
+- feat: optional `tx` param on `UpdateBudgetUsage` for transaction support
+- feat: config.json source-of-truth flow
+- fix: reduce FTS index `left()` cap from 800k to 250k chars to stay within tsvector limit
+- fix: cascade deletes for model configs
+- fix: remove stale in-memory model configs
+- fix: add monotonic `inc_number` log cursor so node usage reconciliation does not skip late async log writes
+- fix: reduce sync worker ticker period to 5m to prevent threshold drift
+- fix: high-scale virtual key flow improvements
+- fix: preserve non-pricing model pool entries across pricing reloads
+- fix: passthrough budgets
+- refactor: make scope-level check methods extensible
+- revert: `access_profile_id` direct access profile assignment on virtual keys
+- chore: drop the `access_profile_id` column from `governance_virtual_keys`
+
+</Update>
+<Update label="compat" description="0.1.16">
+- fix: preserve chat `max_tokens` during param filtering
+- chore: upgraded core to v1.5.17 and framework to v1.3.17
+
+</Update>
+<Update label="governance" description="1.5.17">
+- feat: provider-level governance for budgets & limits
+- feat: scope-aware budgets & limits wired from model configs
+- feat: team budget and rate-limit collection exporters
+- feat: multiple budget support for customers
+- feat: `calendar_aligned` budget support for customers
+- fix: replicate VK hierarchy flow for ghost node reconciliation
+- fix: cascade deletes for model configs
+- fix: create virtual key double usage counting
+- fix: high-scale virtual key flow improvements
+- fix: remove stale in-memory model configs
+- fix: gate models for passthrough in VK if present
+- fix: restrict fallbacks and provider selection to VK boundary
+- fix: passthrough budgets
+- refactor: make scope-level check methods extensible
+
+</Update>
+<Update label="jsonparser" description="1.5.17">
+- chore: upgraded core to v1.5.17 and framework to v1.3.17
+
+</Update>
+<Update label="logging" description="1.5.17">
+- feat: multiple customers logs and usage tracking
+- feat: multiple team and business unit support in logstore
+- feat: OpenAI compaction support
+- feat: `request_headers` pattern capture with wildcard support
+- feat: wildcard pattern support for logging header capture, e.g. `x-custom-*`
+- feat: render file attachments in logs
+- fix: passthrough budgets
+
+</Update>
+<Update label="maxim" description="1.6.17">
+- feat: `request_headers` pattern capture with wildcard support
+
+</Update>
+<Update label="mocker" description="1.5.17">
+- chore: upgraded core to v1.5.17 and framework to v1.3.17
+
+</Update>
+<Update label="otel" description="1.2.17">
+- feat: `disable_content_logging` option to drop message/tool content from exported spans
+- feat: `request_headers` pattern capture with wildcard support
+- feat: multiple OTel collectors support
+
+</Update>
+<Update label="prompts" description="1.0.17">
+- chore: upgraded core to v1.5.17 and framework to v1.3.17
+
+</Update>
+<Update label="semanticcache" description="1.5.17">
+- chore: upgraded core to v1.5.17 and framework to v1.3.17
+
+</Update>
+<Update label="telemetry" description="1.5.17">
+- chore: upgraded core to v1.5.17 and framework to v1.3.17
+
+</Update>

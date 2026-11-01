@@ -1,0 +1,297 @@
+---
+title: "Compatibility Plugin"
+description: "Request and response transformations for LiteLLM proxy/SDK compatibility."
+icon: "train"
+---
+
+## Compatibility Transformations
+
+The LiteLLM compatibility plugin provides two transformations:
+
+1. **Text-to-Chat Conversion** - Automatically converts text completion requests to chat completion format for models that only support chat APIs
+2. **Chat-to-Responses Conversion** - Automatically converts chat completion requests to responses format for models that only support responses APIs
+3. **Drop Unsupported Params** - Automatically drops unsupported parameters if the model doesn't support them. A `reasoning.summary` value the datasheet marks unsupported (`supports_reasoning_summary_detailed`, `supports_reasoning_summary_concise` or `supports_reasoning_summary_auto` set to `false`) becomes `auto` when the model accepts `auto`, and is dropped otherwise. Reasoning effort is always kept
+4. **Unsupported Parameter Conversion** - Automatically converts unsupported parameters to their supported equivalents
+5. **Reasoning-Only Models to Responses** - Routes chat completion requests to the Responses API for models that cannot reason alongside tool calls on chat completions
+6. **Decision-to-Responses Emulation** - Answers decision requests for models without a native decisions endpoint by prompting the model through the Responses API (off by default)
+
+When either transformation is applied, responses include `extra_fields.converted_request_type: <transformed_request_type>`. If request parameters are dropped, the keys are added in `extra_fields.dropped_compat_plugin_params`.
+
+---
+
+## 1. Text-to-Chat Conversion
+
+Many modern AI models (like GPT-3.5-turbo, GPT-4, Claude, etc.) only support the chat completion API and don't have native text completion endpoints. LiteLLM compatibility mode automatically handles this by:
+
+1. Checking if the model supports text completion natively (using the model catalog)
+2. If not supported, converting your text prompt to chat message format
+3. Calling the chat completion endpoint internally
+4. Transforming the response back to text completion format
+5. Returning content in `choices[0].text` instead of `choices[0].message.content`
+
+<Note>
+**Smart Conversion**: The conversion only happens when the model doesn't support text completions natively. If a model has native text completion support (like OpenAI's davinci models), Bifrost uses the text completion endpoint directly without any conversion.
+</Note>
+
+This allows you to use a unified text completion interface across all providers, even those that only support chat completions.
+
+## How It Works
+
+When LiteLLM compatibility is enabled and you make a text completion request, Bifrost first checks if the model supports text completion:
+
+```mermaid
+flowchart LR
+A[Text Completion Request] --> B{Model Supports Text Completion?}
+B -->|Yes| C[Call Text Completion API]
+B -->|No| D[Convert to Chat Message]
+D --> E[Call Chat Completion API]
+E --> F[Transform Response]
+C --> G[Text Completion Response]
+F --> G
+```
+
+**Request Transformation:**
+- Your text prompt becomes a user message: `{"role": "user", "content": "your prompt"}`
+- Parameters like `max_tokens`, `temperature`, `top_p` are mapped to chat equivalents
+- Fallbacks are preserved
+
+**Response Transformation:**
+- `choices[0].message.content` → `choices[0].text`
+- `object: "chat.completion"` → `object: "text_completion"`
+- Usage statistics and metadata are preserved
+
+## 2. Chat-to-Responses Conversion
+
+Some AI models (like OpenAI o1-pro) only support the responses API and don't support native chat completion endpoints. LiteLLM compatibility mode automatically handles this by:
+
+1. Checking if the model supports chat completion natively (using the model catalog)
+2. If not supported, converting your chat message to responses API format
+3. Calling the responses endpoint internally
+4. Transforming the response back to chat completion format
+
+<Note>
+**Smart Conversion**: The conversion only happens when the model doesn't support chat completions natively. If a model has native chat completion support (like OpenAI's gpt-4 models), Bifrost uses the chat completion endpoint directly without any conversion.
+</Note>
+
+This allows you to use a unified chat completion interface across all providers, even those that only support responses API.
+
+## How It Works
+
+When LiteLLM compatibility is enabled and you make a chat completion request, Bifrost first checks if the model supports chat completion:
+
+```mermaid
+flowchart LR
+A[Chat Completion Request] --> B{Model Supports Chat Completion?}
+B -->|Yes| C[Call Chat Completion API]
+B -->|No| D[Convert to Responses Message]
+D --> E[Call Responses API]
+E --> F[Transform Response]
+C --> G[Chat Completion Response]
+F --> G
+```
+
+## 3. Reasoning-Only Models to Responses
+
+Some models (for example several GPT-5 series models) do not support reasoning together with tool calls on the chat completions API. Their datasheet entry sets `supports_reasoning_with_tool_calls: false`. For any chat completion request on such a model, with or without tools, Bifrost:
+
+1. Calls the Responses API instead, where reasoning and tools work together
+2. Transforms the response back to chat completion format
+
+With `force_reasoning_only_models_to_responses` off, the request stays on chat completions. What happens to reasoning then depends on `should_drop_params`:
+
+- **`should_drop_params` on**: when the request carries tools, reasoning is turned off (dropped, or set to `none` when the model supports it).
+- **`should_drop_params` off**: the request is sent with its reasoning setting unchanged.
+
+Controlled by `force_reasoning_only_models_to_responses` (on by default).
+
+## 4. Decision-to-Responses Emulation
+
+Decision requests (`/v1/decisions`, `/openai/v1/decisions`, `/typesafe/v1/systemone`) are served natively only by decision models. With this setting off, a decision request for any other model, such as `openai/gpt-4o`, fails with HTTP 400 and code `unsupported_operation`:
+
+```text
+decisions is not supported by openai provider
+```
+
+With `convert_decision_to_responses` on, Bifrost instead:
+
+1. Checks whether the model is a native decisions model: its `supports_decisions` datasheet entry, or without one the models Bifrost recognizes by name:
+   - OpenAI's `gpt-6-luna` family on `openai` and `azure` (another provider hosting it, such as OpenRouter, serves it as a chat model)
+   - Typesafe's `typesafe/` models, and every model on the `typesafe` provider
+   - `clef` models (`clef`, `clef-flash`, `clef-omni`, by bare name or `@cf/cloudflare/` ID) on `cloudflare`
+   - `pplx-decider-*` on `perplexity`
+   - `nimble`, `tev1`, `clef`, `clef-flash`, and `laya` (any tag) on `ollama`
+   - `Microsoft-Decision-1` on `azure`
+   - `ai_decide` and System One models (`system.ai.openjev-*` and `system.ai.typesafeai-jev-*`) on `databricks`
+2. If it is, calls the provider's decisions endpoint without any conversion
+3. If not, encodes the questions as a forced function tool, sends the input to the model's Responses API, and maps the call's arguments back to typed answers
+
+**Why it breaks custom providers.** The check relies on the model catalog, which has no entries for custom providers. With the setting on, a custom provider serving decisions, such as [Laya or Nimble](/providers/self-hosted-decision-models) on the Typesafe base format, or `gpt-6-luna` behind a custom provider on the OpenAI base format, is emulated through a Responses API it may not serve instead of answered natively. This applies to Complexity Router classification too.
+
+We recommend keeping this setting off and sending decisions to a model that serves them natively. An emulated answer is a chat model's guess, not a calibrated judgment, and it costs a full chat call.
+
+**Behavior notes:**
+- The check runs on every attempt, fallbacks included.
+- An emulated response reports `extra_fields.converted_request_type: "responses"` and is billed as the chat call it is.
+- A request with an image or other non-text part is rejected, as are passthrough extra params (`x-bf-passthrough-extra-params`).
+- Per request, the header `x-bf-compat: ["convert_decision_to_responses"]` turns it on for that request only.
+- In the Go SDK, it is on when the compat plugin is registered with `compat.Config{ConvertDecisionToResponses: true}`.
+
+## Enabling LiteLLM Compatibility
+
+<Tabs group="litellm-compat">
+
+<Tab title="Gateway UI">
+
+1. Open the Bifrost dashboard
+2. Navigate to **Settings** → **Compatibility**
+3. There you can enable the features you need:
+   - **Convert Text to Chat** - converts text completion requests to chat for models that only support chat
+   - **Convert Chat to Responses** - converts chat completion requests to responses for models that only support responses
+   - **Drop Unsupported Params** - drops unsupported parameters based on model catalog allowlist
+   - **Convert Unsupported Params Values** - converts parameter values the model cannot accept, such as a token cap above the model limit, to values it can. See the list of [supported parameters](#supported-parameters) below.
+   - **Azure DeepSeek** - converts Azure DeepSeek responses requests to chat completions so reasoning is preserved for coding harnesses
+   - **Reasoning-only models to Responses** - routes chat completion requests to the Responses API for models that cannot reason with tool calls on chat completions
+   - **Emulate Decisions API on non-decision models** - answers decision requests for models without a native decisions endpoint through the Responses API
+4. Save your configuration
+
+![Compatibility Settings](../media/compatibility-settings.png)
+
+</Tab>
+
+<Tab title="Configuration File">
+
+```json
+{
+  "client_config": {
+    "compat": {
+      "convert_text_to_chat": true,
+      "convert_chat_to_responses": true,
+      "should_drop_params": true,
+      "should_convert_params": true,
+      "azure_deepseek": true,
+      "force_reasoning_only_models_to_responses": true,
+      "convert_decision_to_responses": false
+    }
+  }
+}
+```
+
+</Tab>
+
+</Tabs>
+
+## Supported Parameters
+
+The following parameter values are converted to values the model accepts:
+
+| Parameter | Original Value | Transformed Value | Provider |
+|-----------|----------------|-------------------|----------|
+| `max_completion_tokens` / `max_tokens` (chat), `max_output_tokens` (responses), `max_tokens` (text) | Above the model's `max_output_tokens` | The model's `max_output_tokens` | Every model with a known output limit |
+| Same as above | Below the model's `min_output_tokens` | The model's `min_output_tokens` | Models whose catalog row sets `min_output_tokens` |
+| `reasoning.max_tokens` | Sent with a token cap that was lowered | Scaled by the same ratio as the cap | Every model with a known output limit |
+| `reasoning.max_tokens` | Outside the model's thinking-budget range | The nearest end of the range | Claude, Gemini 2.5, and models whose catalog row sets `reasoning_budget` |
+| `reasoning.max_tokens` | At or above the lowered cap, or the model's `max_output_tokens` when no cap was sent | One below that cap | Every model with a known output limit |
+
+Limits come from the model catalog, with built-in fallbacks for Claude output limits and Claude and Gemini 2.5 thinking budgets. Only values present in the request are changed; none are added. Budgets of `0` and `-1` are left as sent. The conversion runs again for each fallback, so every fallback model is fitted to its own limits. Each conversion is logged as a warning on the request, for example `max_output_tokens: 1000000 -> 65536`.
+
+`developer` role messages are mapped to `system` by the Gemini, Vertex and Bedrock providers themselves, so that works without this setting.
+
+Namespace-scoped tools are no longer handled by this plugin. Bifrost core flattens them for every provider whose wire does not support the `namespace` tool type, renames each nested function to `<namespace>__<function>` so names stay unique, and maps returned `function_call` items back to the original `name` plus `namespace`.
+
+## Supported Providers
+
+Text completion to chat completion conversion works with any provider that supports chat completions but lacks native text completion support:
+
+| Provider | Native Text Completion | With Fallback |
+|----------|----------------------|------------------|
+| OpenAI (GPT-4, GPT-3.5-turbo) | No | Yes |
+| Anthropic (Claude) | No | Yes |
+| Groq | No | Yes |
+| Gemini | No | Yes |
+| Mistral | No | Yes |
+| Bedrock | Varies by model | Yes |
+
+Chat completion to responses conversion works with any provider that supports responses but lacks native chat completion support:
+
+| Provider | Native Chat Completion | With Fallback |
+|----------|----------------------|------------------|
+| OpenAI (o1-pro) | No | Yes |
+
+## Behavior Details
+
+**Model Capability Detection:**
+- Bifrost uses the model catalog to check if a model supports text completion
+- If the model has a "completion" mode in its pricing data, it supports text completion
+- Conversion only happens when the model lacks native text completion support
+
+## Transformations Reference
+
+### Transformation 1: Text-to-Chat Conversion
+
+**Applies to:** Text completion requests on chat-only models
+
+| Phase | Original | Transformed |
+|-------|----------|-------------|
+| Request | Text prompt (string) | Chat message with `role: "user"` |
+| Request | Array prompts | Concatenated into text content blocks |
+| Request | `text_completion` request type | `chat_completion` request type |
+| Request | `max_tokens`, `temperature`, `top_p` | Mapped to chat equivalents |
+| Response | `choices[0].message.content` | `choices[0].text` |
+| Response | `object: "chat.completion"` | `object: "text_completion"` |
+
+### Transformation 2: Chat-to-Responses Conversion
+
+**Applies to:** Chat completion requests on responses-only models
+
+| Phase | Original | Transformed |
+|-------|----------|-------------|
+| Request | Chat message with `role: "user"` | Responses input with `role: "user"` |
+| Request | `chat_completion` request type | `responses` request type |
+
+### Metadata Set on Transformed Responses
+
+When either transformation is applied:
+
+- `extra_fields.request_type`: Reflects the original request type
+- `extra_fields.original_model_requested`: The originally requested model
+- `extra_fields.resolved_model_used`: The actual provider API identifier used (equals original_model_requested when no alias mapping exists)
+
+### Error Handling
+
+When errors occur on transformed requests:
+- Original request type and model are preserved in error metadata
+- `extra_fields.converted_request_type`: Set to type of request that was converted to (i.e., `chat_completion` or `responses`)
+- `extra_fields.provider`: The provider that handled the request
+- `extra_fields.original_model_requested`: The originally requested model
+- `extra_fields.dropped_compat_plugin_params`: If any unsupported parameters were dropped, the keys are added here
+
+## Header Overrides
+
+To enable compat plugins per request, you can use `x-bf-compat` header:
+- When `x-bf-compat: true` or `x-bf-compat: ["*"]`, enables all compat plugins options
+- When `x-bf-compat: ["<setting1>","<setting2>"]`, enables the specified settings (available settings: `convert_text_to_chat`, `convert_chat_to_responses`, `should_drop_params`, `should_convert_params`, `azure_deepseek`, `force_reasoning_only_models_to_responses`, `convert_decision_to_responses`)
+
+## What's Preserved
+
+- Model selection and fallback chain
+- Temperature, top_p, max_tokens, and other generation parameters
+- Stop sequences and frequency/presence penalties
+- Usage statistics and token counts
+
+## When to Use This
+
+**Good Use Cases:**
+- Migrating from LiteLLM to Bifrost without code changes
+- Maintaining backward compatibility with text completion interfaces or chat completion interfaces
+- Using a unified API across providers with different capabilities
+
+**Consider Alternatives When:**
+- You need chat-specific features (system messages, conversation history)
+- You want explicit control over message formatting
+- Performance is critical (direct chat requests avoid conversion overhead)
+
+## Related Features
+
+- [Fallbacks](/features/fallbacks) - Automatic provider failover
+- [Drop-in Replacement](/features/drop-in-replacement) - Use existing SDKs with Bifrost
+- [LiteLLM Integration](/integrations/litellm-sdk) - Using LiteLLM SDK with Bifrost

@@ -1,0 +1,3 @@
+# Document each exception with a CVE, rationale, and expiry date.
+# Example:
+# CVE-0000-00000  # not reachable; review by 2026-12-31

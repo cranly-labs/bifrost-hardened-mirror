@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax
+        run: python3 -m py_compile scripts/*.py tests/*.py
+
+      - name: Distribution tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Vendor integrity
+        run: python3 scripts/verify_vendor.py
+
+      - name: Validate JSON documents
+        run: |
+          python3 -m json.tool vendor.lock.json >/dev/null
+          python3 -m json.tool vendor.lock.schema.json >/dev/null
+
+      - name: Install linters
+        run: |
+          python3 -m pip install --disable-pip-version-check yamllint==1.35.1
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: YAML lint
+        run: yamllint -c .yamllint.yml .github deploy docs compose.yaml
+
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh docker/*.sh
+
+      - name: Dockerfile lint
+        run: |
+          docker run --rm -i \
+            -v "$PWD/.hadolint.yaml:/config/.hadolint.yaml:ro" \
+            hadolint/hadolint@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e \
+            hadolint --config /config/.hadolint.yaml - < Dockerfile
+
+      - name: Workflow lint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+
+  compose:
+    name: Compose manifests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate local stack
+        run: docker compose -f compose.yaml config >/dev/null
+
+      - name: Validate Coolify template
+        env:
+          BIFROST_IMAGE: ghcr.io/example/bifrost:v0.0.0
+          BIFROST_ENCRYPTION_KEY: validation-only
+        run: docker compose -f deploy/coolify/compose.yaml config >/dev/null
+
+      - name: Validate rendered production manifest
+        run: |
+          DIGEST="sha256:$(printf 'a%.0s' {1..64})"
+          python3 scripts/render_production.py \
+            --image "ghcr.io/example/bifrost@${DIGEST}" \
+            --version "v0.0.0" \
+            --upstream-tag "transports/v0.0.0" \
+            --upstream-commit "0000000000000000000000000000000000000000" \
+            --output-dir dist/production
+          BIFROST_ENCRYPTION_KEY=validation-only \
+            docker compose -f dist/production/compose.yaml config >/dev/null
+
+  build:
+    name: Build, smoke test, and scan
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned release
+        id: release
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+
+          lock = json.load(open("vendor.lock.json", encoding="utf-8"))
+          build_date = subprocess.check_output(
+              ["git", "log", "-1", "--format=%cI"], text=True
+          ).strip()
+          print(f"version={lock['upstream']['version']}")
+          print(f"tag={lock['upstream']['tag']}")
+          print(f"commit={lock['upstream']['commit']}")
+          print(f"build_date={build_date}")
+          PY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and load image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          pull: true
+          tags: bifrost-ci:${{ github.sha }}
+          build-args: |
+            BIFROST_VERSION=${{ steps.release.outputs.version }}
+            BIFROST_REVISION=${{ github.sha }}
+            BUILD_DATE=${{ steps.release.outputs.build_date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Smoke test
+        env:
+          IMAGE: bifrost-ci:${{ github.sha }}
+          BIFROST_VERSION: ${{ steps.release.outputs.version }}
+        run: scripts/smoke_test.sh
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: bifrost-ci:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          trivyignores: .trivyignore
+
+      - name: Container metadata
+        run: |
+          docker image inspect bifrost-ci:${{ github.sha }} \
+            --format 'user={{.Config.User}} entrypoint={{json .Config.Entrypoint}} healthcheck={{json .Config.Healthcheck}}'

@@ -1,0 +1,733 @@
+---
+title: "Multimodal Support"
+description: "Process multiple types of content including images, audio, and text with AI models. Bifrost supports vision analysis, image generation, speech synthesis, and audio transcription across various providers."
+icon: "images"
+---
+
+## Vision: Analyzing Images with AI
+
+Send images to vision-capable models for analysis, description, and understanding. This example shows how to analyze an image from a URL using GPT-4o with high detail processing for better accuracy.
+
+```go
+response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostChatRequest{
+	Provider: schemas.OpenAI,
+	Model:    "gpt-4o", // Using vision-capable model
+	Input: []schemas.ChatMessage{
+		{
+			Role: schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{
+				ContentBlocks: []schemas.ChatContentBlock{
+					{
+						Type: schemas.ChatContentBlockTypeText,
+						Text: schemas.Ptr("What do you see in this image? Please describe it in detail."),
+					},
+					{
+						Type: schemas.ChatContentBlockTypeImage,
+						ImageURLStruct: &schemas.ChatInputImage{
+							URL:    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+							Detail: schemas.Ptr("high"), // Optional: can be "low", "high", or "auto"
+						},
+					},
+				},
+			},
+		},
+	},
+})
+
+if err != nil {
+	panic(err)
+}
+
+fmt.Println("Response:", *response.Choices[0].Message.Content.ContentStr)
+```
+
+## Image Generation: Generating Images with AI
+
+Generate images from text prompts using OpenAI-compatible image generation models via the Go SDK.
+
+```go
+response, err := client.ImageGenerationRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostImageGenerationRequest{
+	Provider: schemas.OpenAI,
+	Model:    "dall-e-3",
+	Input: &schemas.ImageGenerationInput{
+		Prompt: "A futuristic city skyline at sunset with flying cars",
+	},
+	Params: &schemas.ImageGenerationParameters{
+		Size:           schemas.Ptr("1024x1024"),
+		ResponseFormat: schemas.Ptr("url"),
+	},
+})
+
+if err != nil {
+	panic(err)
+}
+
+// Handle image generation response
+if len(response.Data) > 0 {
+	imageData := response.Data[0]
+	
+	// Handle URL response (when response_format is "url")
+	if imageData.URL != "" {
+		fmt.Printf("Generated image URL: %s\n", imageData.URL)
+	}
+	
+	// Handle base64-encoded response (when response_format is "b64_json")
+	if imageData.B64JSON != "" {
+		fmt.Printf("Generated base64 image (length: %d)\n", len(imageData.B64JSON))
+	}
+	
+	// Handle revised prompt if present
+	if imageData.RevisedPrompt != "" {
+		fmt.Printf("Revised prompt: %s\n", imageData.RevisedPrompt)
+	}
+}
+
+// Handle usage metrics
+// Note: For image generation endpoints, response.Usage and Usage.TotalTokens may be empty/not populated
+// as token-based usage metrics are not provided by some image-generation providers
+if response.Usage != nil {
+	fmt.Printf("Usage: %d tokens\n", response.Usage.TotalTokens)
+}
+```
+
+## Audio Understanding: Analyzing Audio with AI
+
+If your chat application supports text input, you can add audio input and output-just include audio in the modalities array and use an audio model, like gpt-4o-audio-preview.
+
+### Audio Input to Model
+
+```go
+response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostChatRequest{
+	Provider: schemas.OpenAI,
+	Model:    "gpt-4o-audio-preview",
+	Input: []schemas.ChatMessage{
+		{
+			Role: schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{
+				ContentBlocks: []schemas.ChatContentBlock{
+					{
+						Type: schemas.ChatContentBlockTypeText,
+						Text: schemas.Ptr("Please analyze this audio recording and summarize what was discussed."),
+					},
+					{
+						Type: schemas.ChatContentBlockTypeInputAudio,
+						InputAudio: &schemas.ChatInputAudio{
+							Data:   []byte("base64-encoded audio data containing the word 'Affirmative'"),
+							Format: "wav",
+						},
+					},
+				},
+			},
+		},
+	},
+})
+```
+
+## Text-to-Speech: Converting Text to Audio
+
+Convert text into natural-sounding speech using AI voice models. This example demonstrates generating an MP3 audio file from text using the "alloy" voice. The result is saved to a local file for playback.
+
+```go
+response, err := client.SpeechRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostSpeechRequest{
+	Provider: schemas.OpenAI,
+	Model:    "tts-1", // Using text-to-speech model
+	Input: &schemas.SpeechInput{
+		Input: "Hello! This is a sample text that will be converted to speech using Bifrost's speech synthesis capabilities. The weather today is wonderful, and I hope you're having a great day!",
+	},
+	Params: &schemas.SpeechParameters{
+		VoiceConfig: &schemas.SpeechVoiceInput{
+			Voice: schemas.Ptr("alloy"),
+		},
+		ResponseFormat: schemas.Ptr("mp3"),
+	},
+})
+
+if err != nil {
+	panic(err)
+}
+
+// Handle speech synthesis response
+if response.Speech != nil && len(response.Speech.Audio) > 0 {
+	// Save the audio to a file
+	filename := "output.mp3"
+	err := os.WriteFile("output.mp3", response.Speech.Audio, 0644)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to save audio file: %v", err))
+	}
+
+	fmt.Printf("Speech synthesis successful! Audio saved to %s, file size: %d bytes\n", filename, len(response.Speech.Audio))
+}
+```
+
+## Speech-to-Text: Transcribing Audio Files
+
+Convert audio files into text using AI transcription models. This example shows how to transcribe an MP3 file using OpenAI's Whisper model, with an optional context prompt to improve accuracy.
+
+```go
+// Read the audio file for transcription
+audioFilename := "output.mp3"
+audioData, err := os.ReadFile(audioFilename)
+if err != nil {
+	panic(fmt.Sprintf("Failed to read audio file %s: %v. Please make sure the file exists.", audioFilename, err))
+}
+
+fmt.Printf("Loaded audio file %s (%d bytes) for transcription...\n", audioFilename, len(audioData))
+
+response, err := client.TranscriptionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostTranscriptionRequest{
+	Provider: schemas.OpenAI,
+	Model:    "whisper-1", // Using Whisper model for transcription
+	Input: &schemas.TranscriptionInput{
+		File: audioData,
+	},
+	Params: &schemas.TranscriptionParameters{
+		Prompt: schemas.Ptr("This is a sample audio transcription from Bifrost speech synthesis."), // Optional: provide context
+	},
+})
+
+if err != nil {
+	panic(err)
+}
+
+fmt.Printf("Transcription Result: %s\n", response.Transcribe.Text)
+```
+
+## Advanced Vision Examples
+
+### Multiple Images
+
+Send multiple images in a single request for comparison or analysis. This is useful for comparing products, analyzing changes over time, or understanding relationships between different visual elements.
+
+```go
+response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostChatRequest{
+	Provider: schemas.OpenAI,
+	Model:    "gpt-4o",
+	Input: []schemas.ChatMessage{
+		{
+			Role: schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{
+				ContentBlocks: []schemas.ChatContentBlock{
+					{
+						Type: schemas.ChatContentBlockTypeText,
+						Text: schemas.Ptr("Compare these two images. What are the differences?"),
+					},
+					{
+						Type: schemas.ChatContentBlockTypeImage,
+						ImageURLStruct: &schemas.ChatInputImage{
+							URL: "https://example.com/image1.jpg",
+						},
+					},
+					{
+						Type: schemas.ChatContentBlockTypeImage,
+						ImageURLStruct: &schemas.ChatInputImage{
+							URL: "https://example.com/image2.jpg",
+						},
+					},
+				},
+			},
+		},
+	},
+})
+```
+
+### Base64 Images
+
+Process local images by encoding them as base64 data URLs. This approach is ideal when you need to analyze images stored locally on your system without uploading them to external URLs first.
+
+```go
+// Read and encode image
+imageData, err := os.ReadFile("local_image.jpg")
+if err != nil {
+	panic(err)
+}
+base64Image := base64.StdEncoding.EncodeToString(imageData)
+dataURL := fmt.Sprintf("data:image/jpeg;base64,%s", base64Image)
+
+response, err := client.ChatCompletionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostChatRequest{
+	Provider: schemas.OpenAI,
+	Model:    "gpt-4o",
+	Input: []schemas.ChatMessage{
+		{
+			Role: schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{
+				ContentBlocks: []schemas.ChatContentBlock{
+					{
+						Type: schemas.ChatContentBlockTypeText,
+						Text: schemas.Ptr("Analyze this image and describe what you see."),
+					},
+					{
+						Type: schemas.ChatContentBlockTypeImage,
+						ImageURLStruct: &schemas.ChatInputImage{
+							URL:    dataURL,
+							Detail: schemas.Ptr("high"),
+						},
+					},
+				},
+			},
+		},
+	},
+})
+```
+
+## Audio Configuration Options
+
+### Voice Selection for Speech Synthesis
+
+OpenAI provides six distinct voice options, each with different characteristics. This example generates sample audio files for each voice so you can compare and choose the one that best fits your application.
+
+```go
+// Available voices: alloy, echo, fable, onyx, nova, shimmer
+voices := []string{"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
+
+for _, voice := range voices {
+	response, err := client.SpeechRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostSpeechRequest{
+		Provider: schemas.OpenAI,
+		Model:    "tts-1",
+		Input: &schemas.SpeechInput{
+			Input: fmt.Sprintf("This is the %s voice speaking.", voice),
+		},
+		Params: &schemas.SpeechParameters{
+			VoiceConfig: &schemas.SpeechVoiceInput{
+				Voice: schemas.Ptr(voice),
+			},
+			ResponseFormat: schemas.Ptr("mp3"),
+		},
+	})
+	
+	if err == nil && response.Speech != nil {
+		filename := fmt.Sprintf("sample_%s.mp3", voice)
+		os.WriteFile(filename, response.Speech.Audio, 0644)
+		fmt.Printf("Generated %s\n", filename)
+	}
+}
+```
+
+### Audio Formats
+
+Generate audio in different formats depending on your use case. MP3 for general use, Opus for web streaming, AAC for mobile apps, and FLAC for high-quality audio applications.
+
+```go
+formats := []string{"mp3", "opus", "aac", "flac"}
+
+for _, format := range formats {
+	response, err := client.SpeechRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostSpeechRequest{
+		Provider: schemas.OpenAI,
+		Model:    "tts-1",
+		Input: &schemas.SpeechInput{
+			Input: "Testing different audio formats.",
+		},
+		Params: &schemas.SpeechParameters{
+			VoiceConfig: &schemas.SpeechVoiceInput{
+				Voice: schemas.Ptr("alloy"),
+			},
+			ResponseFormat: schemas.Ptr(format),
+		}
+	})
+	
+	if err == nil && response.Speech != nil {
+		filename := fmt.Sprintf("output.%s", format)
+		os.WriteFile(filename, response.Speech.Audio, 0644)
+	}
+}
+```
+
+## Transcription Options
+
+### Language Specification
+
+Improve transcription accuracy by specifying the source language. This is particularly helpful for non-English audio or when the audio contains technical terms or specific domain vocabulary.
+
+```go
+response, err := client.TranscriptionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostTranscriptionRequest{
+	Provider: schemas.OpenAI,
+	Model:    "whisper-1",
+	Input: &schemas.TranscriptionInput{
+		File: audioData,
+	},
+	Params: &schemas.TranscriptionParameters{
+		Language: schemas.Ptr("es"), // Spanish
+		Prompt:   schemas.Ptr("This is a Spanish audio recording about technology."),
+	},
+})
+```
+
+### Response Formats
+
+Choose between simple text output or detailed JSON responses with timestamps. The verbose JSON format provides word-level and segment-level timing information, useful for creating subtitles or analyzing speech patterns.
+
+```go
+// Text only
+response, err := client.TranscriptionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostTranscriptionRequest{
+	Provider: schemas.OpenAI,
+	Model:    "whisper-1",
+	Input: &schemas.TranscriptionInput{
+		File: audioData,
+	},
+	Params: &schemas.TranscriptionParameters{
+		ResponseFormat: schemas.Ptr("text"),
+	},
+})
+
+// JSON with timestamps
+response, err := client.TranscriptionRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostTranscriptionRequest{
+	Provider: schemas.OpenAI,
+	Model:    "whisper-1",
+	Input: &schemas.TranscriptionInput{
+		File: audioData,
+	},
+	Params: &schemas.TranscriptionParameters{
+		ResponseFormat:             schemas.Ptr("verbose_json"),
+		TimestampGranularities:     []string{"word", "segment"},
+	},
+})
+```
+
+## Multimodal Embeddings
+
+Bifrost supports multimodal embeddings — generating vector representations that capture text, images, audio, video, and documents together. The `Input` field on `BifrostEmbeddingRequest` is a `[]EmbeddingInputItem`; each item's `Content` is an `EmbeddingContent`, a slice of typed parts, and all the parts in one item produce **one** vector.
+
+```go
+type EmbeddingInputItem struct {
+    Content EmbeddingContent     // []EmbeddingContentPart
+    Params  *EmbeddingParameters // optional per-item override
+}
+
+type EmbeddingContentPart struct {
+    Type        EmbeddingContentPartType // text | image | audio | video | file | tokens
+    Text        *string
+    Image       *EmbeddingMediaPart
+    Audio       *EmbeddingMediaPart
+    File        *EmbeddingMediaPart
+    Video       *EmbeddingMediaPart
+    VideoConfig *EmbeddingVideoConfig    // video parts only
+    Tokens      []int
+}
+
+type EmbeddingMediaPart struct {
+    Data     *string // inline base64 data URI (or raw base64 with MIMEType set)
+    URL      *string // provider-resolvable reference; accepted schemes vary per provider
+    MIMEType *string
+    Filename *string
+}
+```
+
+Exactly one modality field must be set per part, and a media part must set exactly one of `Data` or `URL`. `ValidateEmbeddingInput` runs before dispatch, so a malformed part fails before any plugin or provider sees it.
+
+`EmbeddingParameters` carries the request-level defaults: `EncodingFormat`, `Dimensions`, `TaskType`, `Title`, `AutoTruncate`, plus `ExtraParams` for provider-specific fields that are forwarded as-is.
+
+### Response fields
+
+`EmbeddingData` gained three optional fields, set only when the provider needs them:
+
+| Field | Description |
+|-------|-------------|
+| `Modality` | `text`, `image`, `audio`, `video` or `audio_video`. Set when a provider returns separate vectors per modality (Vertex `multimodalembedding@001`, Nova). |
+| `VideoSegment` | `{StartOffsetSec, EndOffsetSec}` on video vectors that cover a slice of the clip. |
+| `EncodingFormat` | Which representation this vector is, when a provider returns several for one input (Cohere `embedding_types`). |
+
+`EncodingFormat: "base64"` works on every provider; where the model has no native base64 output Bifrost encodes the float vector as little-endian float32 base64.
+
+### Provider support
+
+| Provider / model | Text | Image | Audio | Video | File | Batch (multiple items) | Per-item params | Media sources |
+|------------------|------|-------|-------|-------|------|------------------------|-----------------|---------------|
+| Gemini `gemini-embedding-2-preview` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | inline, Files API URI |
+| Gemini `gemini-embedding-001` | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | — |
+| Vertex `gemini-embedding-2-preview` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | inline, `gs://`, `https://` |
+| Vertex `multimodalembedding@001` | ✅ | ✅ (max 1) | ❌ | ✅ (max 1) | ❌ | ❌ | ❌ | inline, `gs://` |
+| Vertex `text-embedding-005` and other text models | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | — |
+| Cohere `embed-v4.0` | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | inline |
+| Cohere `embed-*-v3.0` | ✅ | ✅ (image-only items) | ❌ | ❌ | ❌ | ✅ | ❌ | inline |
+| Bedrock `amazon.titan-embed-image-v1` | ✅ | ✅ (max 1) | ❌ | ❌ | ❌ | ❌ | ❌ | inline |
+| Bedrock `amazon.titan-embed-text-v1` / `v2:0` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | — |
+| Bedrock `cohere.embed-*` | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | inline |
+| Bedrock `amazon.nova-2-multimodal-embeddings-v1:0` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | inline, `s3://` |
+| OpenAI, Azure, Mistral, Parasail and other OpenAI-compatible | ✅ (+ tokens) | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | — |
+| HuggingFace | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | — |
+
+A part the target model cannot carry returns an `InvalidRequestError` naming the modality. Bifrost never drops a part silently. The per-model rules below are the same as on the HTTP gateway; see the [gateway guide](../gateway/multimodal#multimodal-embeddings) for the wire-level detail.
+
+### Text Embedding (all providers)
+
+```go
+text := "a golden retriever playing fetch"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Cohere,
+    Model:    "embed-v4.0",
+    Input: []schemas.EmbeddingInputItem{
+        {Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: &text}}},
+    },
+    Params: &schemas.EmbeddingParameters{
+        ExtraParams: map[string]interface{}{"input_type": "search_document"},
+    },
+})
+```
+
+### Gemini
+
+`gemini-embedding-2-preview` accepts text, image, audio, video and file (PDF) parts in any combination in one item. `gemini-embedding-001` is text-only.
+
+- Inline `Data` is sent as `inlineData`.
+- A `URL` is sent as `fileData.fileUri`, which the Gemini API only resolves for [Files API](https://ai.google.dev/gemini-api/docs/files) URIs. Upload large media first, or send it inline. `gs://` is rejected on the Gemini provider; use Vertex for Cloud Storage media.
+- Multiple items go out as one `:batchEmbedContents` call. `TaskType` and `Title` apply to every entry, and this is the only provider that honours per-item `Params`.
+- `documentOcr` and `audioTrackExtraction` go in `ExtraParams["embedContentConfig"]`.
+
+```go
+audioURL := "https://generativelanguage.googleapis.com/v1beta/files/<file-id>" // from the Files API
+text     := "transcript of the audio"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Gemini,
+    Model:    "gemini-embedding-2-preview",
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText,  Text:  &text},
+                {Type: schemas.EmbeddingContentPartTypeAudio, Audio: &schemas.EmbeddingMediaPart{URL: &audioURL}},
+            },
+        },
+    },
+})
+```
+
+For PDFs, use the `file` part type with `MIMEType: "application/pdf"`, and enable OCR through `embedContentConfig`:
+
+```go
+pdfData := "data:application/pdf;base64,<base64-encoded-pdf>"
+pdfMime := "application/pdf"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Gemini,
+    Model:    "gemini-embedding-2-preview",
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeFile, File: &schemas.EmbeddingMediaPart{Data: &pdfData, MIMEType: &pdfMime}},
+            },
+        },
+    },
+    Params: &schemas.EmbeddingParameters{
+        ExtraParams: map[string]interface{}{
+            "embedContentConfig": map[string]interface{}{"documentOcr": true},
+        },
+    },
+})
+```
+
+### Vertex AI
+
+Vertex has three embedding APIs, and Bifrost picks the right one from the model name. Project and region come from the Vertex key configuration.
+
+| Model | Vertex endpoint | Input |
+|-------|-----------------|-------|
+| `text-embedding-005`, `text-multilingual-embedding-002` and other text models | `:predict` | Text only. Multiple items become one instance each. `Dimensions` → `outputDimensionality`; `TaskType` and `Title` are set per instance; `AutoTruncate` defaults to `true`. |
+| `gemini-embedding-2-preview` | `:embedContent` | Same parts as Gemini, **one item per request** (a second item is an `InvalidRequestError`). `gs://` URIs are accepted on every media part. |
+| `multimodalembedding@001` | `:predict` (multimodal) | One item with any number of text parts, at most one image and at most one video. Audio and file parts are rejected. |
+
+`multimodalembedding@001` returns a **separate 1408-dimension vector per modality**, all in the same embedding space. Image and video URLs must be `gs://`; inline base64 data URIs are also accepted.
+
+```go
+imageGCS := "gs://my-bucket/photo.jpg"
+text     := "product photo"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Vertex,
+    Model:    "multimodalembedding@001",
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText,  Text:  &text},
+                {Type: schemas.EmbeddingContentPartTypeImage, Image: &schemas.EmbeddingMediaPart{URL: &imageGCS}},
+            },
+        },
+    },
+})
+// resp.Data[0].Modality == schemas.EmbeddingModalityText
+// resp.Data[1].Modality == schemas.EmbeddingModalityImage
+// resp.Usage == nil — this model does not report token usage
+```
+
+Video is embedded as a **sequence of segments**. Set `VideoConfig` on the video part (`IntervalSec` minimum is 4 seconds) and each segment comes back as its own `EmbeddingData` with a `VideoSegment`:
+
+```go
+videoGCS := "gs://my-bucket/demo.mp4"
+text     := "product demo"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Vertex,
+    Model:    "multimodalembedding@001",
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText, Text: &text},
+                {
+                    Type:  schemas.EmbeddingContentPartTypeVideo,
+                    Video: &schemas.EmbeddingMediaPart{URL: &videoGCS},
+                    VideoConfig: &schemas.EmbeddingVideoConfig{
+                        StartOffsetSec: schemas.Ptr(0),
+                        EndOffsetSec:   schemas.Ptr(16),
+                        IntervalSec:    schemas.Ptr(8),
+                    },
+                },
+            },
+        },
+    },
+})
+// resp.Data[0]: Modality text
+// resp.Data[1]: Modality video, VideoSegment {0, 8}
+// resp.Data[2]: Modality video, VideoSegment {8, 16}
+```
+
+### Cohere
+
+Cohere's API has three mutually exclusive input fields, and Bifrost picks one from the content: `texts[]` when every item is a single text part, `images[]` when every item is a single image part, and `inputs[]` content blocks (Embed v4 only) for anything else, such as text and image in one item.
+
+Images must be inline: a data URI in `URL` or `Data`, or raw base64 in `Data` with `MIMEType` set. Cohere does not fetch remote URLs. `input_type` defaults to `search_document`. `EncodingFormat` maps to Cohere's `embedding_types`; when Cohere returns several representations for one input, each is a separate `EmbeddingData` labelled with its `EncodingFormat`. Image tokens are reported in `Usage.PromptTokensDetails.ImageTokens`, not `PromptTokens`.
+
+```go
+imageURL := "data:image/jpeg;base64,<base64-encoded-jpeg>"
+caption  := "a golden retriever in a park"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Cohere,
+    Model:    "embed-v4.0",
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText,  Text:  &caption},
+                {Type: schemas.EmbeddingContentPartTypeImage, Image: &schemas.EmbeddingMediaPart{URL: &imageURL}},
+            },
+        },
+    },
+    Params: &schemas.EmbeddingParameters{
+        EncodingFormat: schemas.Ptr("int8"),
+        ExtraParams:    map[string]interface{}{"input_type": "search_document"},
+    },
+})
+```
+
+### Bedrock
+
+Bedrock embedding models are routed by family, each with its own wire format and constraints.
+
+**Titan.** `amazon.titan-embed-image-v1` accepts one item with text and at most one image, inline in `Data` only (a `URL` is rejected). `Dimensions` (256, 384 or 1024) maps to `embeddingConfig.outputEmbeddingLength`. The text models `amazon.titan-embed-text-v1` / `v2:0` take one item per request; a batch is an `InvalidRequestError` rather than a collapsed vector.
+
+```go
+imageData := "data:image/png;base64,<base64-encoded-png>"
+text      := "a red square"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Bedrock,
+    Model:    "amazon.titan-embed-image-v1",
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText,  Text:  &text},
+                {Type: schemas.EmbeddingContentPartTypeImage, Image: &schemas.EmbeddingMediaPart{Data: &imageData}},
+            },
+        },
+    },
+    Params: &schemas.EmbeddingParameters{Dimensions: schemas.Ptr(384)},
+})
+```
+
+**Cohere on Bedrock.** `cohere.embed-*` models follow the same `texts[]` / `images[]` / `inputs[]` selection as direct Cohere. Image-only requests go out as `images[]` with `input_type` defaulting to `image`, which both Embed v3 and v4 accept; mixed text + image items use `inputs[]` and need Embed v4.
+
+**Amazon Nova.** `amazon.nova-2-multimodal-embeddings-v1:0` embeds text, image, audio or video, **one modality per item and one item per request**. Media comes from inline `Data` or an `s3://bucket/key` URL; any other URL is rejected. Nova needs a declared format per media part, derived from `MIMEType` or the S3 key's extension (`png`, `jpeg`, `webp`, `gif`; `mp3`, `wav`, `ogg`; `mp4`, `mov`, `mkv`, `webm`, `flv`, `mpeg`, `wmv`, `3gp`). `TaskType` maps to `embeddingPurpose` (`GENERIC_INDEX` default, `GENERIC_RETRIEVAL`, `TEXT_RETRIEVAL`, `IMAGE_RETRIEVAL`, `VIDEO_RETRIEVAL`, `AUDIO_RETRIEVAL`, `DOCUMENT_RETRIEVAL`, `CLASSIFICATION`, `CLUSTERING`), `Dimensions` is 256, 384, 1024 or 3072, and Nova's own knobs ride in `ExtraParams`: `truncationMode` (`END`, `START`, `NONE`), `detailLevel` (`STANDARD_IMAGE`, `DOCUMENT_IMAGE`; image parts only) and `embeddingMode` (video only).
+
+Video returns one `audio_video` vector by default. With `embeddingMode: "AUDIO_VIDEO_SEPARATE"` one input returns an `audio` vector and a `video` vector:
+
+```go
+videoS3 := "s3://my-bucket/clips/demo.mp4"
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Bedrock,
+    Model:    "amazon.nova-2-multimodal-embeddings-v1:0",
+    Input: []schemas.EmbeddingInputItem{
+        {Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeVideo, Video: &schemas.EmbeddingMediaPart{URL: &videoS3}}}},
+    },
+    Params: &schemas.EmbeddingParameters{
+        TaskType:    schemas.Ptr("VIDEO_RETRIEVAL"),
+        ExtraParams: map[string]interface{}{"embeddingMode": "AUDIO_VIDEO_SEPARATE"},
+    },
+})
+// resp.Data[0].Modality == schemas.EmbeddingModalityAudio
+// resp.Data[1].Modality == schemas.EmbeddingModalityVideo
+```
+
+Nova and Cohere-on-Bedrock report token usage only in a response header, which Bifrost reads into `Usage`.
+
+### OpenAI-compatible providers
+
+OpenAI, Azure OpenAI, Mistral, Parasail and every other provider that speaks the OpenAI embeddings dialect accept `text` and `tokens` parts only, and the two cannot be mixed in one request. Only `EncodingFormat` and `Dimensions` are sent on the wire; `TaskType`, `Title` and `AutoTruncate` are not part of the OpenAI format and are not forwarded.
+
+```go
+tokens := []int{15339, 1917}
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.OpenAI,
+    Model:    "text-embedding-3-small",
+    Input: []schemas.EmbeddingInputItem{
+        {Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeTokens, Tokens: tokens}}},
+    },
+    Params: &schemas.EmbeddingParameters{Dimensions: schemas.Ptr(512)},
+})
+```
+
+### Per-Item Parameters
+
+Leave `Params` nil on an item and it inherits the request-level defaults; set it and that item
+alone uses the override — a query embedded with `RETRIEVAL_QUERY` alongside documents embedded
+with `RETRIEVAL_DOCUMENT`, say.
+
+```go
+query := "how do I reset my password?"
+doc   := "Password reset guide"
+
+resp, err := client.EmbeddingRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostEmbeddingRequest{
+    Provider: schemas.Gemini,
+    Model:    "gemini-embedding-001",
+    // Default for every item that does not override it.
+    Params: &schemas.EmbeddingParameters{Dimensions: schemas.Ptr(768)},
+    Input: []schemas.EmbeddingInputItem{
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText, Text: &query},
+            },
+            Params: &schemas.EmbeddingParameters{
+                TaskType:   schemas.Ptr("RETRIEVAL_QUERY"),
+                Dimensions: schemas.Ptr(768),
+            },
+        },
+        {
+            Content: schemas.EmbeddingContent{
+                {Type: schemas.EmbeddingContentPartTypeText, Text: &doc},
+            },
+            Params: &schemas.EmbeddingParameters{
+                TaskType:   schemas.Ptr("RETRIEVAL_DOCUMENT"),
+                Dimensions: schemas.Ptr(256),
+            },
+        },
+    },
+})
+// resp.Data has one entry per input item, in order.
+```
+
+An item that sets `Params` **replaces** the request-level params wholesale — the two are not
+merged field by field, so repeat any request-level value you still want (as `Dimensions` is
+repeated above). `EmbeddingInputItem.EffectiveParams(defaults)` returns the params an item will
+actually be sent with.
+
+<Warning>
+Only providers whose wire format has one parameter block per item can honour this — currently
+Gemini (`:batchEmbedContents`). Everything else returns a 400 naming the offending item index
+rather than silently ignoring the override.
+</Warning>
+
+### Things to know
+
+- **Token usage is uneven across multimodal models.** Vertex `multimodalembedding@001` returns a nil `Usage`, Titan image-only inputs report zero tokens, and Cohere image tokens live under `PromptTokensDetails`. Budgets and cost metered on `PromptTokens` do not see those inputs.
+- **Semantic cache** keys include `TaskType`, `Title` and `AutoTruncate`, so a `RETRIEVAL_QUERY` request is never served a cached `RETRIEVAL_DOCUMENT` vector.
+- **Migrating from the old `EmbeddingInput` struct:** `&schemas.EmbeddingInput{Texts: []string{"hello"}}` becomes `[]schemas.EmbeddingInputItem{{Content: schemas.EmbeddingContent{{Type: schemas.EmbeddingContentPartTypeText, Text: &text}}}}`. The helpers `EmbeddingInput(items).Texts()` and `.TokenIDs()` flatten the new shape back to the old one when you only need the strings or token IDs.
+
+<Info>
+Check the [Supported Providers](/providers/supported-providers/overview) page for more information on multimodal capabilities supported by each provider.
+</Info>
+
+## Next Steps
+
+- **[Streaming Responses](./streaming)** - Real-time multimodal processing
+- **[Tool Calling](./tool-calling)** - Combine with external tools
+- **[Provider Configuration](./provider-configuration)** - Multiple providers for different capabilities
+- **[Core Features](../../features/)** - Advanced Bifrost capabilities

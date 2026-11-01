@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Bifrost upstream documentation
+    url: https://docs.getbifrost.ai/
+    about: Provider configuration, gateway features, and upstream behavior.
+  - name: Security report
+    url: https://github.com/OWNER/REPO/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.

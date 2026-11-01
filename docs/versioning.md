@@ -43,7 +43,7 @@ The first build of a version uses the plain tag, `v2.4.0`.
 Production deployments pin a digest:
 
 ```text
-ghcr.io/OWNER/REPO@sha256:<64 hex characters>
+ghcr.io/cranly-labs/bifrost-hardened-mirror@sha256:<64 hex characters>
 ```
 
 Tags are human-readable pointers. Digests are the deployment identity.

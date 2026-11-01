@@ -26,5 +26,5 @@ revision suffix.
 - Coolify Compose manifest with persistent storage, resource limits, log
   rotation, and hardened container options.
 
-[Unreleased]: https://github.com/OWNER/REPO/compare/v2.4.0...HEAD
-[2.4.0]: https://github.com/OWNER/REPO/releases/tag/v2.4.0
+[Unreleased]: https://github.com/cranly-labs/bifrost-hardened-mirror/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/cranly-labs/bifrost-hardened-mirror/releases/tag/v2.4.0

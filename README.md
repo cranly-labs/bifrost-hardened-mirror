@@ -3,11 +3,11 @@
 **A reproducible, supply-chain-hardened distribution of the Bifrost AI Gateway,
 built for production and designed for Coolify.**
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
-[![Release](https://github.com/OWNER/REPO/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/release.yml)
+[![CI](https://github.com/cranly-labs/bifrost-hardened-mirror/actions/workflows/ci.yml/badge.svg)](https://github.com/cranly-labs/bifrost-hardened-mirror/actions/workflows/ci.yml)
+[![Release](https://github.com/cranly-labs/bifrost-hardened-mirror/actions/workflows/release.yml/badge.svg)](https://github.com/cranly-labs/bifrost-hardened-mirror/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Container](https://img.shields.io/badge/image-ghcr.io%2FOWNER%2FREPO-2496ED?logo=docker&logoColor=white)](https://github.com/OWNER/REPO/pkgs/container/REPO)
+[![Container](https://img.shields.io/badge/image-ghcr.io%2Fcranly-labs%2Fbifrost-hardened-mirror-2496ED?logo=docker&logoColor=white)](https://github.com/cranly-labs/bifrost-hardened-mirror/pkgs/container/bifrost-hardened-mirror)
 
 ---
 
@@ -68,7 +68,7 @@ docker run -d \
   -v bifrost-data:/app/data \
   -e BIFROST_ENCRYPTION_KEY \
   -e BIFROST_SETUP_TOKEN \
-  ghcr.io/OWNER/REPO:v2.4.0
+  ghcr.io/cranly-labs/bifrost-hardened-mirror:v2.4.0
 ```
 
 Open `http://localhost:8080`, create the first administrator with the setup
@@ -96,10 +96,10 @@ rollback, is in [docs/coolify.md](docs/coolify.md).
 ## Release integrity
 
 ```bash
-IMAGE="ghcr.io/OWNER/REPO@sha256:<digest>"
+IMAGE="ghcr.io/cranly-labs/bifrost-hardened-mirror@sha256:<digest>"
 
 cosign verify "$IMAGE" \
-  --certificate-identity-regexp '^https://github.com/OWNER/REPO/' \
+  --certificate-identity-regexp '^https://github.com/cranly-labs/bifrost-hardened-mirror/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 docker buildx imagetools inspect "$IMAGE"

@@ -121,7 +121,7 @@ LABEL org.opencontainers.image.title="Bifrost Distribution" \
       org.opencontainers.image.revision="${BIFROST_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/OWNER/REPO" \
+      org.opencontainers.image.source="https://github.com/cranly-labs/bifrost-hardened-mirror" \
       org.opencontainers.image.base.name="alpine:3.23.5" \
       com.bifrost.distribution="true"
 

@@ -1,8 +1,8 @@
 # Repository owners.
-* @OWNER
+* @cranly-labs
 
-/.github/ @OWNER
-/deploy/ @OWNER
-/scripts/ @OWNER
-/Dockerfile @OWNER
-/vendor.lock.json @OWNER
+/.github/ @cranly-labs
+/deploy/ @cranly-labs
+/scripts/ @cranly-labs
+/Dockerfile @cranly-labs
+/vendor.lock.json @cranly-labs

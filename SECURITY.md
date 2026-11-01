@@ -41,10 +41,10 @@ cannot reach production silently.
 ## Verify a release
 
 ```bash
-IMAGE="ghcr.io/OWNER/REPO@sha256:<digest>"
+IMAGE="ghcr.io/cranly-labs/bifrost-hardened-mirror@sha256:<digest>"
 
 cosign verify "$IMAGE" \
-  --certificate-identity-regexp '^https://github.com/OWNER/REPO/' \
+  --certificate-identity-regexp '^https://github.com/cranly-labs/bifrost-hardened-mirror/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 docker buildx imagetools inspect "$IMAGE"

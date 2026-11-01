@@ -4,5 +4,5 @@ contact_links:
     url: https://docs.getbifrost.ai/
     about: Provider configuration, gateway features, and upstream behavior.
   - name: Security report
-    url: https://github.com/OWNER/REPO/security/advisories/new
+    url: https://github.com/cranly-labs/bifrost-hardened-mirror/security/advisories/new
     about: Report vulnerabilities privately. Do not open a public issue.

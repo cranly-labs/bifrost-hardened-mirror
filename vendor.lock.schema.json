@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/OWNER/REPO/vendor.lock.schema.json",
+  "$id": "https://github.com/cranly-labs/bifrost-hardened-mirror/vendor.lock.schema.json",
   "title": "Bifrost distribution vendor lock",
   "type": "object",
   "additionalProperties": false,

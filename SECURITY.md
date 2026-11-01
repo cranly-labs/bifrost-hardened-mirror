@@ -30,7 +30,7 @@ cannot reach production silently.
 |---|---|
 | Reproducible source snapshot | `upstream/` is vendored from a pinned upstream tag; `vendor.lock.json` records the commit, Git tree, file count, and SHA-256 tree digest. |
 | Integrity verification | `scripts/verify_vendor.py` recomputes the tree digest in CI. Local edits to `upstream/` fail the build. |
-| Build isolation | Multi-stage build; no compilers, language toolchains, or build tooling in the runtime image. |
+| Build isolation | Multi-stage build; no compilers, language toolchains, or build tooling in the runtime image. Alpine security updates are applied inside the pinned base-image branch. |
 | Non-root runtime | The production Compose manifest runs as UID/GID `10001`, drops all Linux capabilities, and enables `no-new-privileges`. |
 | Immutable production image | The `production` branch pins an image digest, not a mutable tag. |
 | Vulnerability gate | Trivy blocks releases with fixable `HIGH` or `CRITICAL` findings. |

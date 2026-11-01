@@ -78,7 +78,8 @@ The `Dockerfile` has three build stages and one runtime stage:
 3. **go-builder** — compiles `bifrost-http` with CGO, statically linked SQLite,
    and the upstream version embedded in the binary.
 4. **runtime** — Alpine with CA certificates, timezone data, TINI, and the
-   compiled binary. Runs as `10001:10001` with a read-only application layer.
+   compiled binary. Applies security updates inside the pinned Alpine branch,
+   then runs as `10001:10001` with a read-only application layer.
 
 The runtime image does not contain a compiler, Node.js, the Go toolchain, or
 upstream build dependencies.

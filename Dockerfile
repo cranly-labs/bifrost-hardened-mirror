@@ -103,7 +103,10 @@ ARG BIFROST_VERSION=dev
 ARG BIFROST_REVISION=unknown
 ARG BUILD_DATE=unknown
 
-RUN apk add --no-cache ca-certificates tzdata libgcc tini \
+# Apply the latest security patches for the pinned Alpine branch. The base
+# image digest pins the branch; apk upgrades OpenSSL and other runtime packages.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates tzdata libgcc tini \
     && addgroup -g 10001 -S bifrost \
     && adduser -u 10001 -S -G bifrost -h /app -s /sbin/nologin bifrost
 

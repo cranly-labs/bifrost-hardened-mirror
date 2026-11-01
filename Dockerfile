@@ -45,7 +45,7 @@ RUN npm run build-enterprise
 # ---------------------------------------------------------------------------
 # Go build (CGO + statically linked SQLite)
 # ---------------------------------------------------------------------------
-FROM golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS go-builder
+FROM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS go-builder
 
 ARG TARGETOS
 ARG TARGETARCH

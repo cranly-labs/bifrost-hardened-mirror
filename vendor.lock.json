@@ -4,15 +4,15 @@
     "generator": "scripts/sync_upstream.py",
     "revision": 1
   },
-  "synced_at": "2026-11-07T02:59:02Z",
+  "synced_at": "2026-11-10T13:21:54Z",
   "upstream": {
-    "commit": "69f4d56d18b9ba00ac5f9cf969b4501a882b9967",
-    "git_tree": "47bfad8b764f12e83d632df6742844e64809cd8b",
-    "release_url": "https://github.com/maximhq/bifrost/releases/tag/transports%2Fv2.5.0",
+    "commit": "7cb75fb2f8276ca48d0792c857fecb67b8879e2f",
+    "git_tree": "fe862c3b2236a41ae4f3bc969f992500e2cb22d0",
+    "release_url": "https://github.com/maximhq/bifrost/releases/tag/transports%2Fv2.5.1",
     "repository": "https://github.com/maximhq/bifrost",
-    "source_url": "https://github.com/maximhq/bifrost/tree/transports/v2.5.0",
-    "tag": "transports/v2.5.0",
-    "version": "2.5.0"
+    "source_url": "https://github.com/maximhq/bifrost/tree/transports/v2.5.1",
+    "tag": "transports/v2.5.1",
+    "version": "2.5.1"
   },
   "vendor": {
     "directory": "upstream",
@@ -33,7 +33,7 @@
       "scripts/terraform/sagemaker/.gitignore",
       "tests/cmd/mcpconsole/.gitignore"
     ],
-    "file_count": 5742,
-    "tree_sha256": "f0a44bdfe9a6b2970c9142429c9dff34d47fbd3edb215cec772f84081f239051"
+    "file_count": 5745,
+    "tree_sha256": "0514808a02334ae08bd2517e6eb259e1df265b3e1196192797bdfabd9db04a3a"
   }
 }

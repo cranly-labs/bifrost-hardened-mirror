@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------------------
 # Source preparation: apply optional distribution patches once.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS source
+FROM --platform=$BUILDPLATFORM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS source
 
 RUN apk add --no-cache patch
 WORKDIR /src
@@ -97,7 +97,7 @@ RUN test -x /out/main
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS runtime
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS runtime
 
 ARG BIFROST_VERSION=dev
 ARG BIFROST_REVISION=unknown

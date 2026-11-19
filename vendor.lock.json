@@ -4,15 +4,15 @@
     "generator": "scripts/sync_upstream.py",
     "revision": 1
   },
-  "synced_at": "2026-11-10T13:21:54Z",
+  "synced_at": "2026-11-19T01:30:27Z",
   "upstream": {
-    "commit": "7cb75fb2f8276ca48d0792c857fecb67b8879e2f",
-    "git_tree": "fe862c3b2236a41ae4f3bc969f992500e2cb22d0",
-    "release_url": "https://github.com/maximhq/bifrost/releases/tag/transports%2Fv2.5.1",
+    "commit": "172617bb045c6f43d697843c115e64f0155ed143",
+    "git_tree": "9d9e5f8f6ca70233760ba44f8cd1cfbc754a903b",
+    "release_url": "https://github.com/maximhq/bifrost/releases/tag/transports%2Fv2.6.0",
     "repository": "https://github.com/maximhq/bifrost",
-    "source_url": "https://github.com/maximhq/bifrost/tree/transports/v2.5.1",
-    "tag": "transports/v2.5.1",
-    "version": "2.5.1"
+    "source_url": "https://github.com/maximhq/bifrost/tree/transports/v2.6.0",
+    "tag": "transports/v2.6.0",
+    "version": "2.6.0"
   },
   "vendor": {
     "directory": "upstream",
@@ -29,11 +29,12 @@
       ".snyk",
       "AGENTS.md",
       "docs/media",
+      "examples/agents/revops-copilot/.gitignore",
       "pulse.yaml",
       "scripts/terraform/sagemaker/.gitignore",
       "tests/cmd/mcpconsole/.gitignore"
     ],
-    "file_count": 5745,
-    "tree_sha256": "0514808a02334ae08bd2517e6eb259e1df265b3e1196192797bdfabd9db04a3a"
+    "file_count": 6142,
+    "tree_sha256": "ccd09d565fe957d67c09e2d65703f130cf41d296f3e3b2c2cfcb0ce2ba4f3432"
   }
 }

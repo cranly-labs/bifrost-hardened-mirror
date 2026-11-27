@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -2535,6 +2536,61 @@ func TestToOpenAIResponsesRequest_RequestLevelCacheTTL(t *testing.T) {
 }
 
 // TestToOpenAIResponsesRequest_PreGPT56DropsPromptCacheOptions pins that every host
+// A dropped prewarm turns a cache-warming request into a billed generation, and a dropped
+// background_options runs a discounted 2h/8h request at the standard rate.
+func TestToOpenAIResponsesRequest_PrewarmAndBackgroundOptionsReachWire(t *testing.T) {
+	const body = `{"model":"%s","input":"hi","background":true,` +
+		`"background_options":{"completion_window":"2h","continuation_id":"run-1"},` +
+		`"prompt_cache_options":{"prewarm":true,"comparison_response_id":"resp_123","ttl":"30m"}}`
+	for _, model := range []string{"openai/gpt-6.2-sol", "openai/gpt-6.2-astra", "azure/gpt-6.2-sol"} {
+		t.Run(model, func(t *testing.T) {
+			var wire OpenAIResponsesRequest
+			if err := sonic.UnmarshalString(fmt.Sprintf(body, model), &wire); err != nil {
+				t.Fatal(err)
+			}
+			_, raw := marshalResponses(t, wire.ToBifrostResponsesRequest(nil))
+			for path, want := range map[string]string{
+				"prompt_cache_options.prewarm":                "true",
+				"prompt_cache_options.comparison_response_id": "resp_123",
+				"prompt_cache_options.ttl":                    "30m",
+				"background_options.completion_window":        "2h",
+				"background_options.continuation_id":          "run-1",
+			} {
+				if got := gjson.Get(raw, path).String(); got != want {
+					t.Errorf("%s = %q, want %q; raw=%s", path, got, want, raw)
+				}
+			}
+		})
+	}
+
+	t.Run("datasheet can mark background_options unsupported", func(t *testing.T) {
+		installCapabilityRecord(t, "gpt-6.2-sol", &schemas.ModelCapabilities{UnsupportedFields: map[string]bool{"background_options": true}})
+		var wire OpenAIResponsesRequest
+		if err := sonic.UnmarshalString(fmt.Sprintf(body, "openai/gpt-6.2-sol"), &wire); err != nil {
+			t.Fatal(err)
+		}
+		bifrostReq := wire.ToBifrostResponsesRequest(nil)
+		_, raw := marshalResponses(t, bifrostReq)
+		if gjson.Get(raw, "background_options").Exists() {
+			t.Errorf("background_options must be dropped; raw=%s", raw)
+		}
+		if caller, _ := sonic.MarshalString(bifrostReq.Params); !gjson.Get(caller, "background_options").Exists() {
+			t.Error("caller params must not be mutated")
+		}
+	})
+
+	t.Run("absent stays absent", func(t *testing.T) {
+		var wire OpenAIResponsesRequest
+		if err := sonic.UnmarshalString(`{"model":"openai/gpt-6.2-sol","input":"hi"}`, &wire); err != nil {
+			t.Fatal(err)
+		}
+		_, raw := marshalResponses(t, wire.ToBifrostResponsesRequest(nil))
+		if gjson.Get(raw, "background_options").Exists() || gjson.Get(raw, "prompt_cache_options").Exists() {
+			t.Errorf("nothing may be synthesized; raw=%s", raw)
+		}
+	})
+}
+
 // drops prompt_cache_options below gpt-5.6, the first generation documented to accept
 // it, and keeps it on any host serving gpt-5.6 or later.
 func TestToOpenAIResponsesRequest_PreGPT56DropsPromptCacheOptions(t *testing.T) {
@@ -2616,9 +2672,10 @@ func TestToOpenAIResponsesRequest_PromptCacheOptionsCatalogRow(t *testing.T) {
 }
 
 // TestToOpenAIResponsesRequest_OpenRouterOmitsImplicitCacheMode pins that OpenRouter's
-// Responses endpoint, which accepts only mode "explicit" (live 400 "expected
-// \"explicit\""), never receives mode "implicit". Implicit is OpenAI's default when
-// mode is absent, so omitting it is lossless; ttl and explicit mode still pass through.
+// Responses endpoint, which accepts prompt_cache_options only with mode "explicit" (live
+// 400 "expected \"explicit\"" for implicit, for no mode with ttl or prewarm, 2026-11-26),
+// receives the object only in explicit mode. Implicit caching is what OpenRouter does when
+// the object is absent, so dropping it degrades the request instead of failing it.
 func TestToOpenAIResponsesRequest_OpenRouterOmitsImplicitCacheMode(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -2626,8 +2683,13 @@ func TestToOpenAIResponsesRequest_OpenRouterOmitsImplicitCacheMode(t *testing.T)
 		want string
 	}{
 		{"implicit only", &schemas.PromptCacheOptions{Mode: new("implicit")}, ""},
-		{"implicit with ttl", &schemas.PromptCacheOptions{Mode: new("implicit"), TTL: new("30m")}, `{"ttl":"30m"}`},
+		{"implicit with ttl", &schemas.PromptCacheOptions{Mode: new("implicit"), TTL: new("30m")}, ""},
+		{"implicit with prewarm", &schemas.PromptCacheOptions{Mode: new("implicit"), Prewarm: new(true)}, ""},
+		{"implicit with comparison id", &schemas.PromptCacheOptions{Mode: new("implicit"), ComparisonResponseID: new("resp_1")}, ""},
+		{"no mode with ttl", &schemas.PromptCacheOptions{TTL: new("5m")}, ""},
+		{"no mode with prewarm", &schemas.PromptCacheOptions{Prewarm: new(true)}, ""},
 		{"explicit", &schemas.PromptCacheOptions{Mode: new("explicit")}, `{"mode":"explicit"}`},
+		{"explicit with prewarm and ttl", &schemas.PromptCacheOptions{Mode: new("explicit"), TTL: new("5m"), Prewarm: new(true)}, `{"mode":"explicit","ttl":"5m","prewarm":true}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &schemas.BifrostResponsesRequest{
@@ -2636,12 +2698,20 @@ func TestToOpenAIResponsesRequest_OpenRouterOmitsImplicitCacheMode(t *testing.T)
 				Input:    []schemas.ResponsesMessage{{Role: new(schemas.ResponsesInputMessageRoleUser), Content: &schemas.ResponsesMessageContent{ContentStr: new("hi")}}},
 				Params:   &schemas.ResponsesParameters{PromptCacheOptions: tc.opts},
 			}
+			before, err := json.Marshal(tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
 			_, raw := marshalResponses(t, req)
 			if got := gjson.Get(raw, "prompt_cache_options").Raw; got != tc.want {
 				t.Errorf("prompt_cache_options = %s, want %s; raw=%s", got, tc.want, raw)
 			}
-			if req.Params.PromptCacheOptions != tc.opts || tc.opts.Mode == nil {
-				t.Error("caller PromptCacheOptions must not be mutated")
+			after, err := json.Marshal(req.Params.PromptCacheOptions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.Params.PromptCacheOptions != tc.opts || string(after) != string(before) {
+				t.Errorf("caller PromptCacheOptions must not be mutated: before %s, after %s", before, after)
 			}
 		})
 	}
@@ -3627,5 +3697,129 @@ func assertFunctionCallOutputFileIsDataURL(t *testing.T, pdf string, fileType *s
 	}
 	if strings.Contains(raw, "file_type") {
 		t.Fatalf("file_type must not reach OpenAI; raw=%s", raw)
+	}
+}
+
+// A Gemini server search replays with its definitions on the output item and no references on the
+// call. The supplied output is kept, so the tools it loaded are there for the call that follows.
+func TestToOpenAIResponsesRequest_KeepsSuppliedToolSearchOutput(t *testing.T) {
+	input := []schemas.ResponsesMessage{
+		toolSearchUserTurn(),
+		{
+			Type:                 schemas.Ptr(schemas.ResponsesMessageTypeToolSearchCall),
+			ResponsesToolMessage: &schemas.ResponsesToolMessage{CallID: schemas.Ptr("ts_1"), Execution: schemas.Ptr("server"), Arguments: schemas.Ptr(`{"query":"fx"}`)},
+		},
+		{
+			Type:                  schemas.Ptr(schemas.ResponsesMessageTypeToolSearchOutput),
+			ToolSearchOutputTools: json.RawMessage(`[{"type":"function","name":"convert_currency","parameters":{"type":"object","properties":{}}}]`),
+			ResponsesToolMessage:  &schemas.ResponsesToolMessage{CallID: schemas.Ptr("ts_1"), Execution: schemas.Ptr("server")},
+		},
+	}
+	raw, _, wireInput := toolSearchWire(t, schemas.OpenAI, "gpt-6-sol", []schemas.ResponsesTool{deferredWeatherTool()}, input)
+	outs := wireItemsOfType(wireInput, "tool_search_output")
+	if len(outs) != 1 || outs[0].Get("tools.0.name").String() != "convert_currency" || outs[0].Get("execution").String() != "server" {
+		t.Fatalf("want one hosted tool_search_output with the supplied definition, got %s", raw)
+	}
+	if outs[0].Get("call_id").Exists() {
+		t.Errorf("a hosted output carries no call_id: %s", outs[0].Raw)
+	}
+}
+
+// A caller that replays Gemini's signed search items sends them as JSON, which is kept verbatim. They
+// are rebuilt in OpenAI's hosted shape, which has no call_id, with the definitions the search loaded.
+// An item without a signature is the caller's own OpenAI item and stays as it was sent.
+func TestToOpenAIResponsesRequest_RebuildsSignedToolSearchReplay(t *testing.T) {
+	decode := func(items ...string) []schemas.ResponsesMessage {
+		input := []schemas.ResponsesMessage{toolSearchUserTurn()}
+		for _, itemJSON := range items {
+			var item schemas.ResponsesMessage
+			if err := schemas.Unmarshal([]byte(itemJSON), &item); err != nil {
+				t.Fatal(err)
+			}
+			input = append(input, item)
+		}
+		return input
+	}
+	const tools = `"tools":[{"type":"function","name":"convert_currency","parameters":{"type":"object","properties":{}}}]`
+	input := decode(
+		`{"type":"tool_search_call","id":"ts_1","call_id":"ts_1","execution":"server","status":"completed","arguments":{"function_names":["convert_currency"]},"encrypted_content":"c2ln"}`,
+		`{"type":"tool_search_output","call_id":"ts_1","execution":"server","status":"completed",`+tools+`,"encrypted_content":"c2ln"}`,
+		`{"type":"function_call","call_id":"fc_1","name":"convert_currency","arguments":"{}"}`,
+		`{"type":"function_call","call_id":"fc_2","name":"get_time","arguments":"{}"}`,
+	)
+	raw, _, wireInput := toolSearchWire(t, schemas.OpenAI, "gpt-6-sol", []schemas.ResponsesTool{deferredWeatherTool()}, input)
+	calls, outs := wireItemsOfType(wireInput, "tool_search_call"), wireItemsOfType(wireInput, "tool_search_output")
+	if len(calls) != 1 || len(outs) != 1 {
+		t.Fatalf("want one call and one output, got %s", raw)
+	}
+	if calls[0].Get("call_id").Exists() || outs[0].Get("call_id").Exists() || strings.Contains(string(raw), "c2ln") {
+		t.Errorf("hosted items carry no call_id and no signature: %s", raw)
+	}
+	if calls[0].Get("arguments.function_names.0").String() != "convert_currency" || outs[0].Get("tools.0.name").String() != "convert_currency" {
+		t.Errorf("the search and the definitions it loaded are kept: %s", raw)
+	}
+	if !outs[0].Get("tools.0.defer_loading").Bool() {
+		t.Errorf("OpenAI refuses a loaded tool that is not deferred: %s", raw)
+	}
+
+	fcs := wireItemsOfType(wireInput, "function_call")
+	if len(fcs) != 2 || fcs[0].Get("namespace").String() != "convert_currency" || fcs[1].Get("namespace").Exists() {
+		t.Errorf("a call to a loaded function names its namespace, and no other call does: %s", raw)
+	}
+	if input[3].ResponsesToolMessage != nil && input[3].Namespace != nil {
+		t.Errorf("the caller's items are not modified")
+	}
+
+	// The pair is found by the id its items share, before a long one is shortened for OpenAI.
+	long := "ts_" + strings.Repeat("x", 20) + "_ts_" + strings.Repeat("s", MaxToolCallIDLength)
+	raw, _, wireInput = toolSearchWire(t, schemas.OpenAI, "gpt-6-sol", []schemas.ResponsesTool{deferredWeatherTool()}, decode(
+		`{"type":"tool_search_call","call_id":"`+long+`","execution":"server","status":"completed","arguments":{"function_names":["convert_currency"]},"encrypted_content":"c2ln"}`,
+		`{"type":"tool_search_output","call_id":"`+long+`","execution":"server","status":"completed",`+tools+`}`))
+	if outs := wireItemsOfType(wireInput, "tool_search_output"); len(outs) != 1 || outs[0].Get("call_id").Exists() {
+		t.Errorf("the output of a signed call with a long id is rebuilt too: %s", raw)
+	}
+
+	// A pair is rebuilt whole when either item is signed.
+	const callItem, outputItem = `{"type":"tool_search_call","call_id":"ts_1","execution":"server","status":"completed","arguments":{"function_names":["convert_currency"]}`, `{"type":"tool_search_output","call_id":"ts_1","execution":"server","status":"completed",` + tools
+	for _, pair := range [][]string{{callItem + `,"encrypted_content":"c2ln"}`, outputItem + `}`}, {callItem + `}`, outputItem + `,"encrypted_content":"c2ln"}`}} {
+		raw, _, wireInput := toolSearchWire(t, schemas.OpenAI, "gpt-6-sol", []schemas.ResponsesTool{deferredWeatherTool()}, decode(append(pair, `{"type":"function_call","call_id":"fc_1","name":"convert_currency","arguments":"{}"}`)...))
+		outs, fcs := wireItemsOfType(wireInput, "tool_search_output"), wireItemsOfType(wireInput, "function_call")
+		if len(wireItemsOfType(wireInput, "tool_search_call")) != 1 || len(outs) != 1 || outs[0].Get("call_id").Exists() || outs[0].Get("tools.0.name").String() != "convert_currency" || fcs[0].Get("namespace").String() != "convert_currency" {
+			t.Errorf("one signed item of a pair: %s", raw)
+		}
+	}
+
+	const own = `{"type":"tool_search_output","id":"tso_1","call_id":null,"execution":"server","status":"completed",` + tools + `}`
+	raw, _, _ = toolSearchWire(t, schemas.OpenAI, "gpt-6-sol", []schemas.ResponsesTool{deferredWeatherTool()}, decode(own))
+	if !strings.Contains(string(raw), own) {
+		t.Errorf("an unsigned item is sent as it came: %s", raw)
+	}
+}
+
+// A Gemini tool search item's signature goes only to Google. It is removed on OpenAI egress from
+// the typed field and from the bytes a verbatim item is re-emitted from, for every model.
+func TestToOpenAIResponsesRequest_StripsToolSearchSignature(t *testing.T) {
+	for _, model := range []string{"gpt-4o", "gpt-6-sol"} {
+		for _, itemJSON := range []string{
+			`{"type":"tool_search_output","execution":"server","call_id":"ts_1","status":"completed","tools":[{"type":"function","name":"f"}],"encrypted_content":"c2ln"}`,
+			`{"type":"tool_search_call","execution":"server","call_id":"ts_1","status":"completed","arguments":{"query":"x"},"encrypted_content":"c2ln"}`,
+		} {
+			var item schemas.ResponsesMessage
+			if err := schemas.Unmarshal([]byte(itemJSON), &item); err != nil {
+				t.Fatal(err)
+			}
+			input := []schemas.ResponsesMessage{toolSearchUserTurn(), item}
+			raw, _, _ := toolSearchWire(t, schemas.OpenAI, model, []schemas.ResponsesTool{deferredWeatherTool()}, input)
+			if strings.Contains(string(raw), "c2ln") {
+				t.Errorf("%s: the signature reached OpenAI: %s", model, raw)
+			}
+			kept, err := schemas.Marshal(input[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(kept), "c2ln") {
+				t.Errorf("the caller's item lost its signature: %s", kept)
+			}
+		}
 	}
 }

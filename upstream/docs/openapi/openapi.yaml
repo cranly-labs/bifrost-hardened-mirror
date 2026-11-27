@@ -488,6 +488,12 @@ paths:
   # Rank (Vertex AI)
   /genai/v1/rank:
     $ref: "./paths/integrations/genai/rank.yaml#/rank"
+  /genai/v1beta/interactions:
+    $ref: "./paths/integrations/genai/interactions.yaml#/collection"
+  /genai/v1beta/interactions/{interaction_id}:
+    $ref: "./paths/integrations/genai/interactions.yaml#/item"
+  /genai/v1beta/interactions/{interaction_id}/cancel:
+    $ref: "./paths/integrations/genai/interactions.yaml#/cancel"
 
   # Long-running video operation polling
   /genai/v1beta/models/{model}/operations/{operation_id}:
@@ -885,6 +891,8 @@ paths:
   # MCP — per-user sessions (OAuth tokens + headers credentials + pending flows)
   /api/mcp/sessions:
     $ref: "./paths/management/mcp.yaml#/sessions"
+  /api/mcp/sessions/connect:
+    $ref: "./paths/management/mcp.yaml#/session-connect"
   /api/mcp/sessions/{id}:
     $ref: "./paths/management/mcp.yaml#/session-by-id"
   /api/mcp/sessions/{id}/reauth:
@@ -1986,6 +1994,8 @@ components:
       $ref: "./schemas/inference/text.yaml#/TextCompletionResponse"
 
     # ==================== Responses API ====================
+    AccessPrograms:
+      $ref: "./schemas/inference/responses.yaml#/AccessPrograms"
     ContextManagement:
       $ref: "./schemas/inference/responses.yaml#/ContextManagement"
     ResponsesRequest:

@@ -253,7 +253,23 @@ type ConfigData struct {
 	presentGovernanceSections map[string]bool
 	presentMCPSections        map[string]bool
 	SkillsRegistry            *SkillsRegistryConfig `json:"skills_registry,omitempty"`
-	rejectedMCPClients        map[string]bool       // file clients dropped while loading; a config.json sync keeps their stored clients
+	rejectedMCPClients        map[string]bool       // file clients dropped while loading, by name; a config.json sync keeps their stored clients
+	rejectedMCPClientIDs      map[string]bool       // the same clients by their declared client_id, for a renamed entry
+}
+
+// rejectMCPClient records a file client dropped while loading, so a config.json
+// sync keeps the stored client it names, by name or by declared client_id.
+func (cd *ConfigData) rejectMCPClient(c *schemas.MCPClientConfig) {
+	if cd.rejectedMCPClients == nil {
+		cd.rejectedMCPClients = map[string]bool{}
+	}
+	cd.rejectedMCPClients[c.Name] = true
+	if c.ID != "" {
+		if cd.rejectedMCPClientIDs == nil {
+			cd.rejectedMCPClientIDs = map[string]bool{}
+		}
+		cd.rejectedMCPClientIDs[c.ID] = true
+	}
 }
 
 // SkillsRegistryConfig defines declarative skill definitions in config.json.
@@ -841,6 +857,9 @@ type Config struct {
 	// the seam enterprise builds and plugins publish through. See the doc on
 	// schemas.NotificationPublisher before adding the first caller.
 	NotificationPublisher schemas.NotificationPublisher
+	// NotificationResolver marks a subject's notifications as handled. Assigned
+	// alongside NotificationPublisher.
+	NotificationResolver schemas.NotificationResolver
 
 	// EnvLabel is a short label (max 10 chars) displayed in the UI sidebar to identify the
 	// environment (e.g. "staging", "prod"). Set via config.json env_label or BIFROST_ENV_LABEL env var.
@@ -1645,6 +1664,14 @@ func validateClientConfig(cc *configstore.ClientConfig) error {
 			return fmt.Errorf("oauth2_server_config.issuer_url must be set to a non-empty value when mcp_server_auth_mode is oauth or both")
 		}
 	}
+	// Failing rather than ignoring it: falling back to the issuer would send
+	// browsers to a hostname they may not resolve.
+	if err := configstore.ValidateOAuth2BrowserBaseURL(cc.OAuth2ServerConfig); err != nil {
+		return err
+	}
+	if err := configstore.ValidateOAuth2AdditionalIssuers(cc.OAuth2ServerConfig); err != nil {
+		return err
+	}
 	// Entries match exactly, so a partial wildcard would silently approve nothing.
 	// PUT /api/config rejects one; config.json and older DB rows reach here.
 	if oc := cc.OAuth2ServerConfig; oc != nil {
@@ -2136,6 +2163,9 @@ func processProvider(
 		if err := providerKeyInFile.Aliases.Validate(baseProvider); err != nil {
 			return fmt.Errorf("invalid aliases for key %q in provider %s: %w", providerKeyInFile.Name, provider, err)
 		}
+		if err := schemas.ValidateKeyServiceTier(baseProvider, providerKeyInFile.ServiceTier); err != nil {
+			return fmt.Errorf("invalid key %q in provider %s: %w", providerKeyInFile.Name, provider, err)
+		}
 	}
 	// Generate hash from config.json provider config
 	fileProviderConfigHash, err := providerCfgInFile.GenerateConfigHash(string(provider))
@@ -2173,6 +2203,9 @@ func processAuthoritativeProvider(
 		}
 		if err := providerKeyInFile.Aliases.Validate(baseProvider); err != nil {
 			logger.Warn("invalid aliases for key %q in provider %s (writing through): %v", providerKeyInFile.Name, provider, err)
+		}
+		if err := schemas.ValidateKeyServiceTier(baseProvider, providerKeyInFile.ServiceTier); err != nil {
+			logger.Warn("invalid key %q in provider %s (writing through): %v", providerKeyInFile.Name, provider, err)
 		}
 	}
 	fileProviderConfigHash, err := providerCfgInFile.GenerateConfigHash(string(provider))
@@ -2294,6 +2327,7 @@ func mergeProviderKeys(provider schemas.ModelProvider, keysInConfigJSON, dbKeys 
 					Enabled:                dbKey.Enabled,
 					UseForBatchAPI:         dbKey.UseForBatchAPI,
 					UseAnthropicEndpoints:  dbKey.UseAnthropicEndpoints,
+					ServiceTier:            dbKey.ServiceTier,
 				})
 				if err != nil {
 					logger.Warn("failed to generate key hash for db key %s (%s): %v, falling back to name comparison", dbKey.Name, provider, err)
@@ -2388,6 +2422,7 @@ func reconcileProviderKeys(provider schemas.ModelProvider, keysInConfigJSON, dbK
 					Enabled:                dbKey.Enabled,
 					UseForBatchAPI:         dbKey.UseForBatchAPI,
 					UseAnthropicEndpoints:  dbKey.UseAnthropicEndpoints,
+					ServiceTier:            dbKey.ServiceTier,
 				})
 				if err != nil {
 					logger.Warn("failed to generate key hash for db key %s (%s): %v", dbKey.Name, provider, err)
@@ -2441,9 +2476,9 @@ func prepareOpenAPIClientFromFile(c *schemas.MCPClientConfig, configDir string, 
 		return fmt.Errorf("connection_type 'openapi' requires openapi_config")
 	}
 	switch c.AuthType {
-	case "", schemas.MCPAuthTypeNone, schemas.MCPAuthTypeHeaders, schemas.MCPAuthTypePerUserHeaders:
+	case "", schemas.MCPAuthTypeNone, schemas.MCPAuthTypeHeaders, schemas.MCPAuthTypePerUserHeaders, schemas.MCPAuthTypeAWSSigV4:
 	default:
-		return fmt.Errorf("auth_type %q is not supported for connection_type 'openapi' (use none, headers or per_user_headers)", c.AuthType)
+		return fmt.Errorf("auth_type %q is not supported for connection_type 'openapi' (use none, headers, per_user_headers or aws_sigv4)", c.AuthType)
 	}
 	oc := c.OpenAPIConfig
 	if strings.TrimSpace(oc.Spec) == "" && oc.SpecFile != nil && strings.TrimSpace(*oc.SpecFile) != "" {
@@ -2481,15 +2516,32 @@ func ResolveMCPClientAuthType(authType schemas.MCPAuthType, connectionType schem
 		return schemas.MCPAuthTypeHeaders, nil
 	case schemas.MCPAuthTypeNone, schemas.MCPAuthTypeHeaders, schemas.MCPAuthTypeOauth:
 		return authType, nil
+	case schemas.MCPAuthTypeClientCredentials:
+		// The bearer token goes on an HTTP request, which a STDIO subprocess never receives.
+		if connectionType == schemas.MCPConnectionTypeSTDIO {
+			return "", fmt.Errorf("auth_type %q is not supported for connection_type '%s' (use connection_type 'http' or 'sse')", authType, connectionType)
+		}
+		return authType, nil
+	case schemas.MCPAuthTypeAWSSigV4:
+		// The signature goes on an HTTP request: the MCP server's, or an openapi upstream's.
+		if connectionType == schemas.MCPConnectionTypeSTDIO {
+			return "", fmt.Errorf("auth_type %q is not supported for connection_type '%s' (use connection_type 'http', 'sse' or 'openapi')", authType, connectionType)
+		}
+		return authType, nil
 	case schemas.MCPAuthTypePerUserOauth, schemas.MCPAuthTypePerUserHeaders, schemas.MCPAuthTypeTokenExchange:
 		if connectionType == schemas.MCPConnectionTypeSSE || connectionType == schemas.MCPConnectionTypeSTDIO {
 			return "", fmt.Errorf("auth_type %q is not supported for connection_type '%s' (use connection_type 'http')", authType, connectionType)
 		}
 		return authType, nil
 	default:
-		return "", fmt.Errorf("Invalid auth_type %q: must be one of none, headers, oauth, per_user_oauth, per_user_headers, token_exchange", authType)
+		return "", fmt.Errorf("Invalid auth_type %q: must be one of none, headers, oauth, per_user_oauth, per_user_headers, token_exchange, client_credentials, aws_sigv4", authType)
 	}
 }
+
+// mcpClientCredentialsLoadTimeout bounds discovering a client_credentials token
+// endpoint while loading config.json, so an unreachable upstream delays startup
+// by at most this long.
+const mcpClientCredentialsLoadTimeout = 15 * time.Second
 
 // loadMCPConfig loads the MCP client configs from the store and config.json and
 // reconciles the two. A config.json client that cannot be created is skipped, and a
@@ -2501,8 +2553,28 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 		}
 		return
 	}
+	logger.Debug("getting MCP config from store")
+	tableMCPConfig, storeErr := config.ConfigStore.GetMCPConfig(ctx)
+	if storeErr != nil {
+		logger.Warn("failed to get MCP config from store: %v", storeErr)
+	}
 	// Validate MCP client names from config file before processing
 	if configData.MCP != nil && len(configData.MCP.ClientConfigs) > 0 {
+		// Matched the way the sync will match: by name, then, where config.json is
+		// the source of truth, by declared client_id (syncMCPConfigFromFile).
+		storedByName := map[string]*schemas.MCPClientConfig{}
+		storedByID := map[string]*schemas.MCPClientConfig{}
+		if tableMCPConfig != nil {
+			for _, stored := range tableMCPConfig.ClientConfigs {
+				if stored != nil {
+					storedByName[stored.Name] = stored
+					if stored.ID != "" {
+						storedByID[stored.ID] = stored
+					}
+				}
+			}
+		}
+		matchByID := configData.isConfigJSONSourceOfTruth() && configData.sectionPresent("mcp")
 		valid := make([]*schemas.MCPClientConfig, 0, len(configData.MCP.ClientConfigs))
 		for _, c := range configData.MCP.ClientConfigs {
 			if c == nil {
@@ -2515,13 +2587,44 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 			authType, err := ResolveMCPClientAuthType(c.AuthType, c.ConnectionType)
 			if err != nil {
 				logger.Error("skipping MCP client config %q from config file: %v; an existing client keeps its stored configuration", c.Name, err)
-				if configData.rejectedMCPClients == nil {
-					configData.rejectedMCPClients = map[string]bool{}
-				}
-				configData.rejectedMCPClients[c.Name] = true
+				configData.rejectMCPClient(c)
 				continue
 			}
 			c.AuthType = authType
+			// The token endpoint is discovered and stored the same way the API does
+			// on save; a client whose endpoint cannot be resolved is skipped. A stored
+			// client keeps its auth type, connection string, public-only rule, and its
+			// block when the entry omits one (pinMCPClientImmutableFields), so
+			// preparation uses what will run.
+			stored := storedByName[c.Name]
+			if stored == nil && matchByID && c.ID != "" {
+				stored = storedByID[c.ID]
+			}
+			effectiveAuth, serverURL, requirePublic := c.AuthType, c.ConnectionString, c.RequirePublicTarget
+			if stored != nil {
+				effectiveAuth = cmp.Or(stored.AuthType, schemas.MCPAuthTypeHeaders)
+				serverURL = stored.ConnectionString
+				requirePublic = requirePublic || stored.RequirePublicTarget
+			}
+			keepsStoredBlock := c.ClientCredentials == nil && stored != nil && stored.ClientCredentials != nil
+			// A declared credential whose reference resolves to nothing would replace a
+			// working block (or create a client) that cannot get a token.
+			if field := unresolvedClientCredential(c.ClientCredentials); effectiveAuth == schemas.MCPAuthTypeClientCredentials && field != "" {
+				logger.Error("skipping MCP client config %q from config file: client_credentials.%s resolves to an empty value; an existing client keeps its stored configuration", c.Name, field)
+				configData.rejectMCPClient(c)
+				continue
+			}
+			if effectiveAuth == schemas.MCPAuthTypeClientCredentials && !keepsStoredBlock {
+				resolveCtx, cancel := context.WithTimeout(ctx, mcpClientCredentialsLoadTimeout)
+				resolved, err := oauth2.PrepareClientCredentials(resolveCtx, strings.TrimSpace(serverURL.GetValue()), requirePublic, c.ClientCredentials)
+				cancel()
+				if err != nil {
+					logger.Error("skipping MCP client config %q from config file: %v; an existing client keeps its stored configuration", c.Name, err)
+					configData.rejectMCPClient(c)
+					continue
+				}
+				c.ClientCredentials = resolved
+			}
 			if c.AuthType == schemas.MCPAuthTypeTokenExchange {
 				if isEnterprise, _ := ctx.Value(schemas.BifrostContextKeyIsEnterprise).(bool); !isEnterprise {
 					logger.Error("skipping MCP client config %q from config file: auth_type 'token_exchange' is not supported", c.Name)
@@ -2532,10 +2635,7 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 			// cannot apply to would also apply what turning it on deletes.
 			if err := mcp.ValidatePerUserDiscovery(c); err != nil {
 				logger.Error("skipping MCP client config %q from config file: %v; an existing client keeps its stored configuration", c.Name, err)
-				if configData.rejectedMCPClients == nil {
-					configData.rejectedMCPClients = map[string]bool{}
-				}
-				configData.rejectedMCPClients[c.Name] = true
+				configData.rejectMCPClient(c)
 				continue
 			}
 			// oauth_config_id is server-managed state — a credentials-row
@@ -2569,10 +2669,7 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 			if c.ConnectionType == schemas.MCPConnectionTypeOpenAPI {
 				if err := prepareOpenAPIClientFromFile(c, config.ConfigDir(), mcpOpenAPIMaxSpecBytes(config.ClientConfig)); err != nil {
 					logger.Error("skipping MCP client config %q from config file: %v; an existing client keeps its stored configuration", c.Name, err)
-					if configData.rejectedMCPClients == nil {
-						configData.rejectedMCPClients = map[string]bool{}
-					}
-					configData.rejectedMCPClients[c.Name] = true
+					configData.rejectMCPClient(c)
 					continue
 				}
 			}
@@ -2581,14 +2678,8 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 		configData.MCP.ClientConfigs = valid
 	}
 
-	if config.ConfigStore != nil {
-		logger.Debug("getting MCP config from store")
-		tableMCPConfig, err := config.ConfigStore.GetMCPConfig(ctx)
-		if err != nil {
-			logger.Warn("failed to get MCP config from store: %v", err)
-		} else if tableMCPConfig != nil {
-			config.MCPConfig = tableMCPConfig
-		}
+	if storeErr == nil && tableMCPConfig != nil {
+		config.MCPConfig = tableMCPConfig
 	}
 
 	if config.MCPConfig != nil {
@@ -2632,6 +2723,24 @@ func loadMCPConfig(ctx context.Context, config *Config, configData *ConfigData) 
 			}
 		}
 	}
+}
+
+// unresolvedClientCredential names the first credential in cc that is declared
+// but resolves to an empty value (an env. or vault. reference with nothing behind
+// it), or returns "".
+func unresolvedClientCredential(cc *schemas.MCPClientCredentialsConfig) string {
+	if cc == nil {
+		return ""
+	}
+	for _, field := range []struct {
+		name  string
+		value *schemas.SecretVar
+	}{{"client_id", cc.ClientID}, {"client_secret", cc.ClientSecret}, {"private_key", cc.PrivateKey}} {
+		if field.value.IsSet() && field.value.GetValue() == "" {
+			return field.name
+		}
+	}
+	return ""
 }
 
 // pinnedPerUserDiscoveryError checks fileClient's per_user_discovery against the
@@ -2733,6 +2842,14 @@ func pinMCPClientImmutableFields(fileClient, existing *schemas.MCPClientConfig) 
 		existing.TokenExchange != nil {
 		logger.Warn("token_exchange cannot be emptied for MCP client %q (auth_type 'token_exchange'); keeping the stored block", existing.Name)
 		fileClient.TokenExchange = existing.TokenExchange
+	}
+	if fileClient.AuthType == schemas.MCPAuthTypeClientCredentials && fileClient.ClientCredentials == nil && existing.ClientCredentials != nil {
+		logger.Warn("client_credentials cannot be emptied for MCP client %q (auth_type 'client_credentials'); keeping the stored block", existing.Name)
+		fileClient.ClientCredentials = existing.ClientCredentials
+	}
+	if fileClient.AuthType == schemas.MCPAuthTypeAWSSigV4 && fileClient.AWSSigV4 == nil && existing.AWSSigV4 != nil {
+		logger.Warn("aws_sigv4 cannot be emptied for MCP client %q (auth_type 'aws_sigv4'); keeping the stored block", existing.Name)
+		fileClient.AWSSigV4 = existing.AWSSigV4
 	}
 
 	fileClient.OauthConfigID = existing.OauthConfigID
@@ -3028,6 +3145,8 @@ func applyMCPClientPinnedStateToRow(row *configstoreTables.TableMCPClient, clien
 	row.EndpointSlug = clientConfig.EndpointSlug
 	row.PerUserHeaderKeys = mcputils.CanonicalizeHeaderKeys(clientConfig.PerUserHeaderKeys)
 	row.TokenExchange = clientConfig.TokenExchange
+	row.ClientCredentials = clientConfig.ClientCredentials
+	row.AWSSigV4 = clientConfig.AWSSigV4
 	row.OauthConfigID = clientConfig.OauthConfigID
 	row.DiscoveredTools = clientConfig.DiscoveredTools
 	row.DiscoveredInstructions = clientConfig.DiscoveredInstructions
@@ -3417,6 +3536,8 @@ func mcpClientConfigToTable(clientConfig *schemas.MCPClientConfig) (configstoreT
 		DiscoveredInstructions: clientConfig.DiscoveredInstructions,
 		PerUserHeaderKeys:      mcputils.CanonicalizeHeaderKeys(clientConfig.PerUserHeaderKeys),
 		TokenExchange:          clientConfig.TokenExchange,
+		ClientCredentials:      clientConfig.ClientCredentials,
+		AWSSigV4:               clientConfig.AWSSigV4,
 		PendingOAuthConfig:     clientConfig.PendingOAuthConfig,
 		OpenAPIConfig:          clientConfig.OpenAPIConfig,
 		ConfigHash:             clientConfig.ConfigHash,
@@ -3466,6 +3587,12 @@ func syncMCPConfigFromFile(ctx context.Context, config *Config, configData *Conf
 	for name := range configData.rejectedMCPClients {
 		if existing := existingByName[name]; existing != nil && existing.ID != "" && !keepIDs[existing.ID] {
 			keepIDs[existing.ID] = true
+			runtimeClients = append(runtimeClients, existing)
+		}
+	}
+	for id := range configData.rejectedMCPClientIDs {
+		if existing := existingByID[id]; existing != nil && !keepIDs[id] {
+			keepIDs[id] = true
 			runtimeClients = append(runtimeClients, existing)
 		}
 	}
@@ -10636,6 +10763,8 @@ func (c *Config) RedactMCPClientConfig(config *schemas.MCPClientConfig) *schemas
 		exchangeCopy.ResourcePrivateKey = exchangeCopy.ResourcePrivateKey.Redacted()
 		configCopy.TokenExchange = &exchangeCopy
 	}
+	configCopy.ClientCredentials = config.ClientCredentials.Redacted()
+	configCopy.AWSSigV4 = config.AWSSigV4.Redacted()
 
 	// Redact credentials inside the inline `oauth_config` bootstrap block.
 	// Copy the struct first — configCopy shares the pointer with the live

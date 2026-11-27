@@ -159,6 +159,9 @@ type BaseGovernancePlugin interface {
 	GetBudgetAndRateLimitStatus(ctx *schemas.BifrostContext, provider schemas.ModelProvider, model string, budgetBaselines map[string]float64, tokenBaselines map[string]int64, requestBaselines map[string]int64) *BudgetAndRateLimitStatus
 	PublishRoutingAllowlist(ctx *schemas.BifrostContext, modelStr string)
 	LoadBalanceProvider(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) error
+	// IsMCPAllowedForUser reports whether the user may call the MCP client named mcpClientName,
+	// so a dashboard surface can offer to connect their own credential to it.
+	IsMCPAllowedForUser(ctx context.Context, mcpClientName, userID string) bool
 }
 
 // AttributeRoutingEmbeddingCostPlugin is an optional capability for governance
@@ -2239,6 +2242,20 @@ func responseSucceeded(result *schemas.BifrostResponse) bool {
 	return true
 }
 
+// readsStoredRun reports whether a request only read or cancelled a stored run that job accounting
+// settles. Every such response repeats the run's full usage; its tokens are charged once, when the
+// run settles.
+func readsStoredRun(requestType schemas.RequestType, result *schemas.BifrostResponse) bool {
+	switch requestType {
+	case schemas.ResponsesRetrieveRequest, schemas.ResponsesCancelRequest:
+		return result.ResponsesResponse != nil && result.ResponsesResponse.ProviderJob != nil
+	case schemas.ResponsesRetrieveStreamRequest:
+		stream := result.ResponsesStreamResponse
+		return stream != nil && stream.Response != nil && stream.Response.ProviderJob != nil
+	}
+	return false
+}
+
 // postHookWorker is a worker function that processes the response and updates usage tracking
 // It is used to avoid blocking the main thread when updating usage tracking
 // Handles both cases: with virtual key and without virtual key (empty string)
@@ -2304,6 +2321,9 @@ func (p *GovernancePlugin) postHookWorker(result *schemas.BifrostResponse, bifro
 				if su := result.PassthroughResponse.PassthroughUsage; su != nil && su.LLMUsage != nil {
 					tokensUsed = su.LLMUsage.TotalTokens
 				}
+			}
+			if readsStoredRun(requestType, result) {
+				tokensUsed = 0
 			}
 		}
 		// A successful response normally carries routing metadata and CalculateCost

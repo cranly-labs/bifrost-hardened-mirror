@@ -15,13 +15,13 @@ import { useForm } from "react-hook-form";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import {
-	authScopeOf,
 	buildMCPClientPayload,
 	getHeadersValidationError,
 	MCPClientFormFields,
 	useMCPClientFormSatellites,
 	validateMCPClientForm,
 } from "../../views/mcpClientFormFields";
+import { authScopeOf } from "../../views/mcpClientsTable.utils";
 import { MCPHeadersAuthorizer } from "../../views/mcpHeadersAuthorizer";
 import { OAuth2Authorizer } from "../../views/oauth2Authorizer";
 import { shouldSeedHeaders } from "./mcpLibraryInstallSheet.utils";
@@ -94,6 +94,10 @@ function authHelpText(authType: MCPAuthType | string | undefined, t: TFunction<"
 			return t("library.install.helpPerUserHeaders");
 		case "token_exchange":
 			return t("library.install.helpTokenExchange");
+		case "client_credentials":
+			return t("library.install.helpClientCredentials");
+		case "aws_sigv4":
+			return t("library.install.helpAwsSigV4");
 		default:
 			return t("library.install.helpNone");
 	}

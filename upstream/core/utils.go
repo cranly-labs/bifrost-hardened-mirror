@@ -463,6 +463,7 @@ func clearCtxForFallback(ctx *schemas.BifrostContext) {
 	ctx.ClearValue(schemas.BifrostContextKeyConnectionClosed)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamBodyExhausted)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamParkedAfterFinish)
+	ctx.ClearValue(schemas.BifrostContextKeyStreamProviderJob)
 	ctx.ClearValue(schemas.BifrostContextKeyStreamAttemptAbort)
 	ctx.ClearValue(schemas.BifrostContextKeySupportsAssistantPrefill)
 	ctx.ClearValue(schemas.BifrostContextKeyDisableStore)
@@ -570,11 +571,20 @@ func ClearContextForInternalRequest(ctx *schemas.BifrostContext) {
 	ctx.ClearValue(schemas.BifrostContextKeySendBackRawRequest)
 	ctx.ClearValue(schemas.BifrostContextKeySendBackRawResponse)
 	ctx.ClearValue(schemas.BifrostContextKeyPassthroughOverridesPresent)
+	// No plugin settles an internal request's runs.
+	ctx.ClearValue(schemas.BifrostContextKeyJobAccounting)
+	ctx.ClearValue(schemas.BifrostContextKeyStreamProviderJob)
 	ctx.ClearValue(schemas.BifrostContextKeyLargePayloadMode)
 	ctx.ClearValue(schemas.BifrostContextKeyLargeResponseMode)
 	ctx.ClearValue(schemas.BifrostContextKeyExtraHeaders)
 	ctx.ClearValue(schemas.BifrostContextKeyPassthroughHeaders)
 	ctx.ClearValue(schemas.BifrostContextKeyURLPath)
+	// The GenAI Interactions route's decisions about the caller's own request.
+	ctx.ClearValue(schemas.BifrostContextKeyGenAITranslationRefusal)
+	ctx.ClearValue(genAIPassthroughSuspendedKey)
+	ctx.ClearValue(schemas.BifrostContextKeyInteractionsAPI)
+	ctx.ClearValue(schemas.BifrostContextKeyInteractionsLocation)
+	ctx.ClearValue(schemas.BifrostContextKeyInteractionsProject)
 }
 
 // PrepareContextForInternalRequest marks ctx as an internal sub-request issued

@@ -638,6 +638,7 @@ func ToOpenAIResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.B
 	replayComputerActions := bifrostReq.Params != nil && slices.ContainsFunc(bifrostReq.Params.Tools, func(t schemas.ResponsesTool) bool {
 		return t.Type == schemas.ResponsesToolTypeComputer
 	})
+	signedSearches := schemas.SignedToolSearchCalls(bifrostReq.Input)
 	for _, message := range bifrostReq.Input {
 		if !keepAdditionalTools && message.Type != nil &&
 			*message.Type == schemas.ResponsesMessageTypeAdditionalTools {
@@ -764,6 +765,10 @@ func ToOpenAIResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.B
 		// OpenAI's limit — shorter IDs are left intact so distinct upstream IDs are preserved.
 		// Deterministic, so a call and its output still match. Clone first — the
 		// ResponsesToolMessage pointer is shared with the caller's input.
+		var searchID *string // a tool search item's id as its pair holds it, before it is shortened
+		if message.ResponsesToolMessage != nil {
+			searchID = message.ResponsesToolMessage.CallID
+		}
 		if message.ResponsesToolMessage != nil && message.ResponsesToolMessage.CallID != nil &&
 			len(*message.ResponsesToolMessage.CallID) > MaxToolCallIDLength {
 			if stripped := utils.StripThoughtSignature(*message.ResponsesToolMessage.CallID); stripped != *message.ResponsesToolMessage.CallID {
@@ -918,7 +923,21 @@ func ToOpenAIResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.B
 		// Drop the token for every model: OpenAI never mints encrypted_content on a message item
 		// and rejects any it receives, and the fail-soft retry would then also strip the genuine
 		// reasoning items' tokens. Separate reasoning items are handled below, unchanged.
-		if message.ResponsesReasoning != nil && len(message.ResponsesReasoning.Summary) == 0 &&
+		if message.Type != nil && (*message.Type == schemas.ResponsesMessageTypeToolSearchCall || *message.Type == schemas.ResponsesMessageTypeToolSearchOutput) {
+			// A tool search item's encrypted_content is Google's signature, which only Google reads.
+			stripped, signed := message.WithoutEncryptedContent()
+			message = stripped
+			message.ResponsesReasoning = nil
+			if !signed && searchID != nil {
+				_, signed = signedSearches[*searchID]
+			}
+			if signed && !message.IsClientToolSearchItem() {
+				// A signed pair is Google's, which pairs a call and its output by call_id; OpenAI's hosted
+				// items have none, so both are rebuilt with the other providers' (replayTypedToolSearchCalls).
+				message = message.WithoutPreservedBytes()
+			}
+			messages = append(messages, message)
+		} else if message.ResponsesReasoning != nil && len(message.ResponsesReasoning.Summary) == 0 &&
 			message.Type != nil && *message.Type == schemas.ResponsesMessageTypeMessage {
 			message.ResponsesReasoning = nil
 			messages = append(messages, message)
@@ -1074,16 +1093,14 @@ func ToOpenAIResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.B
 			optsCopy.TTL = nil
 			req.PromptCacheOptions = &optsCopy
 		}
-		// OpenRouter Responses accepts only mode "explicit"; "implicit" is the default, so omit it.
-		if opts := req.PromptCacheOptions; opts != nil && opts.Mode != nil && *opts.Mode == "implicit" &&
+		// OpenRouter Responses accepts prompt_cache_options only with mode "explicit" and 400s
+		// on anything else; implicit caching is its default without the object, so drop it.
+		if opts := req.PromptCacheOptions; opts != nil && (opts.Mode == nil || *opts.Mode != "explicit") &&
 			cachePromptProvider == schemas.OpenRouter {
-			if opts.TTL == nil {
-				req.PromptCacheOptions = nil
-			} else {
-				optsCopy := *opts
-				optsCopy.Mode = nil
-				req.PromptCacheOptions = &optsCopy
-			}
+			req.PromptCacheOptions = nil
+		}
+		if req.BackgroundOptions != nil && caps.FieldUnsupported(schemas.FieldBackgroundOptions, false) {
+			req.BackgroundOptions = nil
 		}
 		req.ServiceTier = serviceTierForModel(caps, req.ServiceTier)
 		if req.ResponsesParameters.MaxOutputTokens != nil && *req.ResponsesParameters.MaxOutputTokens < MinMaxCompletionTokens {
@@ -1262,13 +1279,14 @@ func ToOpenAIResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.B
 	// strict-pydantic upstreams (e.g. sglang) reject the explicit null outright.
 	// We must copy the Tools slice since it shares the backing array with bifrostReq.Params.Tools.
 	if len(req.Tools) > 0 {
+		flattenRoot := !caps.SupportsRootSchemaComposition(schemas.ModelSupportsRootSchemaComposition(capModel))
 		normalizedTools := normalizeAsyncTools(req.Tools, asyncToolsSupported)
 		for i, tool := range normalizedTools {
 			if tool.Type == schemas.ResponsesToolTypeFunction &&
 				tool.ResponsesToolFunction != nil {
 				funcCopy := *tool.ResponsesToolFunction
 				if funcCopy.Parameters != nil {
-					funcCopy.Parameters = funcCopy.Parameters.Normalized()
+					funcCopy.Parameters = schemas.FlattenRootCompositionIf(funcCopy.Parameters, flattenRoot).Normalized()
 				}
 				if funcCopy.Strict == nil {
 					funcCopy.Strict = new(false)
@@ -1299,6 +1317,15 @@ func ToOpenAIResponsesRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.B
 	if features, ok := ProviderFeatures[bifrostReq.Provider]; ok && !features.ContextManagement {
 		req.ContextManagement = nil
 		delete(req.ExtraParams, "context_management")
+	}
+
+	// access_programs (Daybreak) is defined only by OpenAI's own Responses API; the other
+	// backends sharing this converter would reject or ignore it. Unlike the feature table
+	// above this is default-closed, and keyed on the base provider so a custom provider
+	// fronting OpenAI keeps it. req holds a copy of the params, so the caller's value
+	// survives for a fallback to OpenAI.
+	if req.AccessPrograms != nil && schemas.ResolveBaseProvider(ctx, bifrostReq.Provider) != schemas.OpenAI {
+		req.AccessPrograms = nil
 	}
 
 	return req

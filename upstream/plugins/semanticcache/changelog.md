@@ -1,1 +1,2 @@
-- chore: upgraded Go to 1.27.4, core to v1.16.0 and framework to v1.13.0
+- feat: a request with `prompt_cache_options.prewarm` gets its own cache key
+- chore: upgraded core to v1.17.0 and framework to v1.14.0

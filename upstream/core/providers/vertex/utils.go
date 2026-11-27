@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/maximhq/bifrost/core/providers/gemini"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	schemas "github.com/maximhq/bifrost/core/schemas"
@@ -249,25 +251,46 @@ func getCompleteURLForGeminiEndpoint(deployment string, region string, projectID
 }
 
 // vertexPriorityModels lists model name prefixes that support Priority PayGo on Vertex.
-// Source: https://cloud.google.com/vertex-ai/generative-ai/docs/priority-paygo
+// Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/priority-paygo
 var vertexPriorityModels = []string{
+	"gemini-4-hydrogen",
+	"gemini-4-carbon",
+	"gemini-4-carbon-cyber-permissive",
+	"gemini-4-argon",
+	"gemini-4-argon-cyber-permissive",
+	"gemini-3.8-flash-cyber",
+	"gemini-3.8-flash",
+	"gemini-3.7-flash",
+	"gemini-3.6-flash",
+	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite-image",
+	"gemini-3-pro-image",
+	"gemini-nano-banana-2.1",
+	"gemini-3.1-flash-image",
+	"gemini-3.5-flash",
+	"gemini-3.1-flash-lite",
+	"gemini-3.1-pro-preview",
+	"gemini-3-flash-preview",
 	"gemini-2.5-pro",
 	"gemini-2.5-flash",
 	"gemini-2.5-flash-lite",
-	"gemini-3-flash-preview",
-	"gemini-3.1-pro-preview",
-	"gemini-3.1-flash-lite",
 }
 
 // vertexFlexModels lists model name prefixes that support Flex PayGo on Vertex.
-// Source: https://cloud.google.com/vertex-ai/generative-ai/docs/flex-paygo
+// Source: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/flex-paygo
 var vertexFlexModels = []string{
-	"gemini-3.1-flash-lite",
-	"gemini-3.1-flash-image-preview",
-	"gemini-3.1-pro-preview",
+	"gemini-3.8-flash-cyber",
+	"gemini-3.8-flash",
+	"gemini-3.7-flash",
+	"gemini-3.6-flash",
 	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite-image",
+	"gemini-3-pro-image",
+	"gemini-3.1-flash-image",
+	"gemini-3.5-flash",
+	"gemini-3.1-flash-lite",
+	"gemini-3.1-pro-preview",
 	"gemini-3-flash-preview",
-	"gemini-3-pro-image-preview",
 }
 
 // isVertexModelSupportedForTier reports whether a model supports the given service tier.
@@ -304,22 +327,25 @@ func vertexTierPrefixMatch(normalized string, tier schemas.BifrostServiceTier) b
 }
 
 // vertexServiceTierHeaderValue returns the value for the X-Vertex-AI-LLM-Shared-Request-Type header,
-// or "" if no header should be set. Requires the global endpoint and a supported model.
+// or "" if no header should be set. Priority PayGo is served on the global and us/eu multi-region
+// endpoints, Flex PayGo on global only; neither on a single region.
 func vertexServiceTierHeaderValue(region string, model string, tier schemas.BifrostServiceTier) string {
-	if region != "global" {
+	switch tier {
+	case schemas.BifrostServiceTierPriority:
+		if region != "global" && !isVertexMultiRegionEndpoint(region) {
+			return ""
+		}
+	case schemas.BifrostServiceTierFlex:
+		if region != "global" {
+			return ""
+		}
+	default:
 		return ""
 	}
 	if !isVertexModelSupportedForTier(model, tier) {
 		return ""
 	}
-	switch tier {
-	case schemas.BifrostServiceTierPriority:
-		return "priority"
-	case schemas.BifrostServiceTierFlex:
-		return "flex"
-	default:
-		return ""
-	}
+	return string(tier)
 }
 
 // vertexKeyUsesAPIKeyOnly reports whether key authenticates with an API key alone, with no service
@@ -468,27 +494,34 @@ var (
 	vertexShortModelLit   = []byte(`"models/`)
 )
 
-// rewritePassthroughBody points a JSON passthrough body at the key's project and region: placeholder
-// project or location segments are replaced and short-form "models/X" names are expanded to full
-// resource paths. Returns the original slice with changed=false when there is nothing to rewrite.
-func rewritePassthroughBody(body []byte, projectID, region string) (out []byte, changed bool) {
-	hasProjects := bytes.Contains(body, vertexBodyProjectsLit)
-	hasLocations := bytes.Contains(body, vertexLocationsLit)
-	hasShortModel := bytes.Contains(body, vertexShortModelLit)
-	if !hasProjects && !hasLocations && !hasShortModel {
-		return body, false
-	}
+// vertexPassthroughResourceFields are the top-level body fields the google-genai SDK fills with the client's
+// project and location. Only these are rewritten; prompt text and every other field pass through untouched.
+var vertexPassthroughResourceFields = []string{"model", "cachedContent", "operationName"}
 
+// rewritePassthroughBody points a JSON passthrough body at the key's project and region: the project and
+// location segments of vertexPassthroughResourceFields are replaced and a short-form "models/X" is expanded
+// to a full resource path. Returns the original slice with changed=false when there is nothing to rewrite.
+func rewritePassthroughBody(body []byte, projectID, region string) (out []byte, changed bool) {
 	out = body
-	if hasProjects {
-		out = vertexBodyProjectsRe.ReplaceAll(out, []byte("${1}projects/"+projectID))
+	if !bytes.Contains(body, vertexBodyProjectsLit) && !bytes.Contains(body, vertexLocationsLit) && !bytes.Contains(body, vertexShortModelLit) {
+		return out, false
 	}
-	if hasLocations {
-		out = vertexLocationsPathRe.ReplaceAll(out, []byte("/locations/"+region))
+	for _, field := range vertexPassthroughResourceFields {
+		value := providerUtils.GetJSONField(out, field)
+		if value.Type != gjson.String {
+			continue
+		}
+		name := vertexBodyProjectsRe.ReplaceAllString(value.Str, "${1}projects/"+projectID)
+		name = vertexLocationsPathRe.ReplaceAllString(name, "/locations/"+region)
+		if strings.HasPrefix(name, "models/") && strings.Count(name, "/") == 1 {
+			name = "projects/" + projectID + "/locations/" + region + "/publishers/google/" + name
+		}
+		if name == value.Str {
+			continue
+		}
+		if rewritten, err := providerUtils.SetJSONField(out, field, name); err == nil {
+			out, changed = rewritten, true
+		}
 	}
-	if hasShortModel {
-		out = vertexShortModelRe.ReplaceAll(out,
-			[]byte(`"projects/`+projectID+`/locations/`+region+`/publishers/google/$1"`))
-	}
-	return out, !bytes.Equal(out, body)
+	return out, changed
 }

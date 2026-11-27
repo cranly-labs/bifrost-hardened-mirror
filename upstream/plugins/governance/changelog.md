@@ -1,5 +1,4 @@
-- feat: the Codex passthrough model list is filtered to the caller's allowed models
-- feat: virtual keys are read from the `xi-api-key` header for ElevenLabs clients
-- fix: updating the budget of a config.json virtual key no longer fails with `invalid reset duration format` (thanks [@High-PO](https://github.com/High-PO)!)
-- fix: a team's cached virtual keys follow its new customer
-- chore: upgraded Go to 1.27.4, core to v1.16.0 and framework to v1.13.0
+- feat: access check for the MCP session connect endpoint
+- fix: a budget or rate-limit charge that lands during a virtual key, team, customer, model config or provider refresh is no longer lost, and a refresh cannot move a reset boundary backward
+- fix: budget and rate-limit resets, baseline installs and dumps update usage and its persisted baseline together
+- chore: upgraded core to v1.17.0 and framework to v1.14.0

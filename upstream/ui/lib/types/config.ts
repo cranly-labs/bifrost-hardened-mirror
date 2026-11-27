@@ -50,6 +50,9 @@ export const ModelFamilyValues: ModelFamily[] = [
 	"titan",
 ];
 
+// ServiceTier matching the request-side values of Go's schemas.BifrostServiceTier.
+export type ServiceTier = "auto" | "default" | "flex" | "priority" | "fast" | "ultrafast";
+
 // AliasConfig matching Go's schemas.AliasConfig.
 // Go embeds AzureAliasCfg/VertexAliasCfg/BedrockAliasCfg/ReplicateAliasCfg as
 // pointer structs which flatten on the wire — sub-config fields live at the
@@ -82,6 +85,7 @@ export interface AliasConfig {
 	deployment_url?: SecretVar;
 	use_anthropic_endpoints?: boolean;
 	use_openai_endpoints?: boolean;
+	service_tier?: ServiceTier;
 }
 
 export interface VertexEndpoint {
@@ -449,6 +453,7 @@ export interface ModelProviderKey {
 	use_for_batch_api?: boolean;
 	use_anthropic_endpoints?: boolean;
 	use_openai_endpoints?: boolean;
+	service_tier?: ServiceTier | null;
 	aliases?: Record<string, AliasConfig>;
 	azure_key_config?: AzureKeyConfig;
 	vertex_key_config?: VertexKeyConfig;
@@ -991,6 +996,8 @@ export interface CoreConfig {
 	mcp_server_auth_mode?: "headers" | "both" | "oauth";
 	oauth2_server_config?: {
 		issuer_url?: SecretVar;
+		browser_base_url?: SecretVar; // where browsers sign in when MCP clients use another hostname; unset means issuer_url
+		additional_issuer_urls?: SecretVar[]; // further issuers, each picked by the request's hostname
 		auth_code_ttl?: number;
 		access_token_ttl?: number;
 		allowed_redirect_uris?: string[];

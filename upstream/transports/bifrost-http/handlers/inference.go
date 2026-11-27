@@ -155,10 +155,12 @@ var chatParamsKnownFields = map[string]bool{
 
 var responsesParamsKnownFields = map[string]bool{
 	"model":                  true,
+	"access_programs":        true,
 	"input":                  true,
 	"fallbacks":              true,
 	"stream":                 true,
 	"background":             true,
+	"background_options":     true,
 	"conversation":           true,
 	"include":                true,
 	"instructions":           true,
@@ -2080,6 +2082,9 @@ func (h *CompletionHandler) responsesRetrieve(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		bifrostReq.StartingAfter = schemas.Ptr(n)
+	}
+	if raw := ctx.QueryArgs().Peek("last_event_id"); len(raw) > 0 {
+		bifrostReq.LastEventID = schemas.Ptr(string(raw))
 	}
 	if raw := ctx.QueryArgs().Peek("include_obfuscation"); len(raw) > 0 {
 		b, err := strconv.ParseBool(string(raw))

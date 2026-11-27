@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -78,8 +79,9 @@ type BifrostResponsesRetrieveRequest struct {
 	StartingAfter      *int          `json:"starting_after,omitempty"`
 	IncludeObfuscation *bool         `json:"include_obfuscation,omitempty"`
 	// Stream replays the stored response as an SSE stream (OpenAI GET /v1/responses/{id}?stream=true).
-	Stream         *bool  `json:"stream,omitempty"`
-	RawRequestBody []byte `json:"-"`
+	Stream         *bool   `json:"stream,omitempty"`
+	LastEventID    *string `json:"last_event_id,omitempty"` // Gemini Interactions: resume a replayed stream after this event
+	RawRequestBody []byte  `json:"-"`
 }
 
 // GetRawRequestBody implements raw body passthrough when enabled on context.
@@ -233,6 +235,7 @@ type BifrostResponsesResponse struct {
 	ID     *string `json:"id,omitempty"` // used for internal conversions
 	Object string  `json:"object"`       // "response"
 
+	AccessPrograms       *AccessPrograms                     `json:"access_programs,omitempty"` // OpenAI trusted-access program that served the request (Daybreak)
 	Background           *bool                               `json:"background,omitempty"`
 	Conversation         *ResponsesResponseConversation      `json:"conversation,omitempty"`
 	CreatedAt            int                                 `json:"created_at"`   // Unix timestamp when Response was created
@@ -279,6 +282,7 @@ type BifrostResponsesResponse struct {
 	ToolUsage            *ToolUsage                          `json:"tool_usage,omitempty"` // Top-level like OpenAI; Usage.ToolUsage mirrors it for pricing and logging
 	ExtraFields          BifrostResponseExtraFields          `json:"extra_fields,omitzero"`
 	ProviderExtraFields  map[string]interface{}              `json:"provider_extra_fields,omitempty"`
+	ProviderJob          *BifrostPassthroughJob              `json:"-"` // a stored run (Gemini Interaction) this response reports on, settled once by job accounting
 
 	// Perplexity-specific fields
 	SearchResults []SearchResult `json:"search_results,omitempty"`
@@ -396,6 +400,7 @@ func (resp *BifrostResponsesResponse) WithDefaults() *BifrostResponsesResponse {
 	result.PromptCacheRetention = resp.PromptCacheRetention
 	result.PromptCacheOptions = resp.PromptCacheOptions
 	result.SafetyIdentifier = resp.SafetyIdentifier
+	result.AccessPrograms = resp.AccessPrograms
 	result.MaxToolCalls = resp.MaxToolCalls
 	result.Instructions = resp.Instructions
 	result.Error = resp.Error
@@ -526,12 +531,73 @@ func orDefault[T any](src *T, defaultVal T) *T {
 }
 
 // PromptCacheOptions is the request-wide prompt-caching configuration OpenAI
-// added with the gpt-5.6 family (echoed back on the response). Mode is
-// "implicit" or "explicit"; TTL is the minimum breakpoint lifetime (currently
-// "30m"). Values are passed through untouched.
+// added with the gpt-5.6 family (echoed back on the response). Values are
+// passed through untouched.
 type PromptCacheOptions struct {
-	Mode *string `json:"mode,omitempty"`
-	TTL  *string `json:"ttl,omitempty"`
+	Mode                 *string `json:"mode,omitempty"`                   // "implicit" | "explicit"
+	TTL                  *string `json:"ttl,omitempty"`                    // "30m" | "12h"
+	Prewarm              *bool   `json:"prewarm,omitempty"`                // Write the cache without generating output
+	ComparisonResponseID *string `json:"comparison_response_id,omitempty"` // Response to diff against for cache diagnostics
+}
+
+type ResponsesBackgroundOptions struct {
+	CompletionWindow *string `json:"completion_window,omitempty"` // "soonest" | "2h" | "8h"
+	ContinuationID   *string `json:"continuation_id,omitempty"`   // Caller-chosen ID that prioritizes related runs
+}
+
+// AccessPrograms selects the OpenAI trusted-access programs a Responses request
+// runs under (developers.openai.com/api/docs/guides/daybreak). Cyber is
+// "standard", "daybreak_blue" or "daybreak_red"; values are passed through
+// untouched so OpenAI stays the validator. On a response it records the program
+// that served the request, and is absent when OpenAI fell back implicitly.
+type AccessPrograms struct {
+	Cyber   *string                    `json:"cyber,omitempty"`
+	Unknown map[string]json.RawMessage `json:"-"` // members not modelled here, forwarded as sent
+}
+
+// UnmarshalJSON keeps every member it does not model, and a cyber that is not a
+// string, verbatim in Unknown. Dropping them would turn a misspelled member such
+// as {"cyebr":"daybreak_red"} into {}, which OpenAI serves under the model's
+// default program with no error; forwarded, OpenAI rejects it with a 400.
+func (a *AccessPrograms) UnmarshalJSON(data []byte) error {
+	var members map[string]json.RawMessage
+	if err := Unmarshal(data, &members); err != nil {
+		return err
+	}
+	*a = AccessPrograms{}
+	for name, raw := range members {
+		if name == "cyber" {
+			var cyber string
+			if err := Unmarshal(raw, &cyber); err == nil && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				a.Cyber = &cyber
+				continue
+			}
+		}
+		if a.Unknown == nil {
+			a.Unknown = make(map[string]json.RawMessage, len(members))
+		}
+		a.Unknown[name] = raw
+	}
+	return nil
+}
+
+// MarshalJSON writes Cyber and the preserved Unknown members, keys sorted so the
+// body stays byte-stable. Without Unknown members it is the plain struct encoding.
+func (a AccessPrograms) MarshalJSON() ([]byte, error) {
+	if len(a.Unknown) == 0 {
+		type alias AccessPrograms
+		return Marshal(alias(a))
+	}
+	members := make(map[string]json.RawMessage, len(a.Unknown)+1)
+	maps.Copy(members, a.Unknown)
+	if a.Cyber != nil {
+		cyber, err := Marshal(*a.Cyber)
+		if err != nil {
+			return nil, err
+		}
+		members["cyber"] = cyber
+	}
+	return MarshalSorted(members)
 }
 
 // PromptCacheBreakpoint marks the end of a cacheable prompt prefix on a content
@@ -542,7 +608,9 @@ type PromptCacheBreakpoint struct {
 }
 
 type ResponsesParameters struct {
+	AccessPrograms       *AccessPrograms                `json:"access_programs,omitempty"` // OpenAI-only trusted-access program (Daybreak)
 	Background           *bool                          `json:"background,omitempty"`
+	BackgroundOptions    *ResponsesBackgroundOptions    `json:"background_options,omitempty"` // Completion window and continuation ID for background runs (OpenAI)
 	Conversation         *ResponsesResponseConversation `json:"conversation,omitempty"`
 	Include              []string                       `json:"include,omitempty"` // Supported values: "web_search_call.action.sources", "code_interpreter_call.outputs", "computer_call_output.output.image_url", "file_search_call.results", "message.input_image.image_url", "message.output_text.logprobs", "reasoning.encrypted_content"
 	Instructions         *string                        `json:"instructions,omitempty"`
@@ -1714,6 +1782,12 @@ func (m *ResponsesMessage) UnmarshalJSON(data []byte) error {
 				m.ToolSearchOutputTools = json.RawMessage(tools.Raw)
 			}
 		}
+		// A Gemini tool search item carries the signature Google needs back on replay.
+		if t == string(ResponsesMessageTypeToolSearchCall) || t == string(ResponsesMessageTypeToolSearchOutput) {
+			if ec := gjson.GetBytes(data, "encrypted_content"); ec.Type == gjson.String && ec.String() != "" {
+				m.ResponsesReasoning = &ResponsesReasoning{EncryptedContent: Ptr(ec.String())}
+			}
+		}
 		// additional_tools carries the codex tool declarations; same rationale.
 		if t == string(ResponsesMessageTypeAdditionalTools) {
 			if tools := gjson.GetBytes(data, "tools"); tools.IsArray() {
@@ -1856,6 +1930,9 @@ func (m ResponsesMessage) MarshalJSON() ([]byte, error) {
 		aux := &struct {
 			Arguments json.RawMessage `json:"arguments,omitempty"`
 			Tools     json.RawMessage `json:"tools,omitempty"`
+			Summary   json.RawMessage `json:"summary,omitempty"` // shadows the reasoning summary a signature-only ResponsesReasoning would emit as null
+			Error     json.RawMessage `json:"error,omitempty"`   // shadows the in-memory failure text; tool_search_output has no error field
+			Output    json.RawMessage `json:"output,omitempty"`  // shadows the in-memory no-match message; it has no output field either
 			*Alias
 		}{
 			Alias: (*Alias)(&m),
@@ -1869,21 +1946,22 @@ func (m ResponsesMessage) MarshalJSON() ([]byte, error) {
 		return MarshalSorted(aux)
 	}
 
-	// summary is a reasoning-item field; OpenAI rejects it on a message item.
-	if m.ResponsesReasoning != nil && len(m.ResponsesReasoning.Summary) == 0 && m.Type != nil && *m.Type == ResponsesMessageTypeMessage {
-		return MarshalSorted(&struct {
-			Summary json.RawMessage `json:"summary,omitempty"`
-			*Alias
-		}{
-			Alias: (*Alias)(&m),
-		})
-	}
-
 	aux := &struct {
 		Arguments json.RawMessage `json:"arguments,omitempty"`
+		Summary   json.RawMessage `json:"summary,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(&m),
+	}
+
+	// summary is a reasoning-item field; OpenAI rejects an empty one on any other item type.
+	if m.ResponsesReasoning != nil &&
+		(len(m.ResponsesReasoning.Summary) > 0 || m.Type == nil || *m.Type == ResponsesMessageTypeReasoning) {
+		encoded, err := Marshal(m.ResponsesReasoning.Summary)
+		if err != nil {
+			return nil, err
+		}
+		aux.Summary = encoded
 	}
 
 	if m.ResponsesToolMessage != nil && m.Arguments != nil {
@@ -2285,6 +2363,52 @@ const ToolSearchExecutionClient = "client"
 // for byte (an OpenAI tool_search_call, tool_search_output or additional_tools item).
 func (m *ResponsesMessage) IsVerbatimItem() bool {
 	return len(m.rawPreserved) > 0
+}
+
+// WithoutEncryptedContent returns m without its encrypted_content, in the decoded field and in the
+// bytes a verbatim item is re-emitted from, and whether either held one. m is not modified.
+func (m ResponsesMessage) WithoutEncryptedContent() (ResponsesMessage, bool) {
+	changed := false
+	if m.ResponsesReasoning != nil && m.ResponsesReasoning.EncryptedContent != nil {
+		reasoning := *m.ResponsesReasoning
+		reasoning.EncryptedContent = nil
+		m.ResponsesReasoning = &reasoning
+		changed = true
+	}
+	if len(m.rawPreserved) > 0 && gjson.GetBytes(m.rawPreserved, "encrypted_content").Exists() {
+		if stripped, err := sjson.DeleteBytes(append([]byte(nil), m.rawPreserved...), "encrypted_content"); err == nil {
+			m.rawPreserved = stripped
+			changed = true
+		}
+	}
+	return m, changed
+}
+
+// WithoutPreservedBytes returns m without the bytes it was decoded from, so it is re-emitted, and can be
+// rebuilt, from its decoded fields. m is not modified.
+func (m ResponsesMessage) WithoutPreservedBytes() ResponsesMessage {
+	m.rawPreserved = nil
+	return m
+}
+
+// SignedToolSearchCalls returns the call ids of the hosted tool searches in input of which an item carries a
+// signature, so a converter treats a call and its output alike when only one does. It does not allocate when
+// there are none.
+func SignedToolSearchCalls(input []ResponsesMessage) map[string]struct{} {
+	var signed map[string]struct{}
+	for i := range input {
+		m := &input[i]
+		if m.Type == nil || (*m.Type != ResponsesMessageTypeToolSearchCall && *m.Type != ResponsesMessageTypeToolSearchOutput) ||
+			m.ResponsesReasoning == nil || m.ResponsesReasoning.EncryptedContent == nil ||
+			m.ResponsesToolMessage == nil || m.CallID == nil || m.IsClientToolSearchItem() {
+			continue
+		}
+		if signed == nil {
+			signed = make(map[string]struct{})
+		}
+		signed[*m.CallID] = struct{}{}
+	}
+	return signed
 }
 
 // IsClientToolSearchItem reports whether m is a tool_search_call or tool_search_output
@@ -4539,6 +4663,9 @@ const (
 	ResponsesStreamResponseTypeProviderRawEvent ResponsesStreamResponseType = "response.provider_raw_event"
 	// SafeguardsUpdate carries an Anthropic classifier event, omitted on OpenAI surfaces.
 	ResponsesStreamResponseTypeSafeguardsUpdate ResponsesStreamResponseType = "response.safeguards_update"
+	// InteractionEvent carries a Gemini Interactions event with no Responses form to the native /genai
+	// route, omitted on OpenAI surfaces.
+	ResponsesStreamResponseTypeInteractionEvent ResponsesStreamResponseType = "response.interaction_event"
 
 	ResponsesStreamResponseTypeCreated    ResponsesStreamResponseType = "response.created"
 	ResponsesStreamResponseTypeInProgress ResponsesStreamResponseType = "response.in_progress"
@@ -4679,6 +4806,8 @@ type BifrostResponsesStreamResponse struct {
 	Message *string                 `json:"message,omitempty"`
 	Param   *string                 `json:"param,omitempty"`
 
+	EventID *string `json:"event_id,omitempty"` // Gemini Interactions: the cursor last_event_id resumes after
+
 	ExtraFields BifrostResponseExtraFields `json:"extra_fields"`
 
 	// SafeguardResults carries the Claude Code auto-mode classifier verdicts found
@@ -4760,13 +4889,14 @@ func (resp *BifrostResponsesStreamResponse) WithDefaults() *BifrostResponsesStre
 	}
 
 	// Filter out non-OpenAI response types
-	if resp.Type == ResponsesStreamResponseTypePing || resp.Type == ResponsesStreamResponseTypeProviderRawEvent || resp.Type == ResponsesStreamResponseTypeSafeguardsUpdate {
+	if resp.Type == ResponsesStreamResponseTypePing || resp.Type == ResponsesStreamResponseTypeProviderRawEvent || resp.Type == ResponsesStreamResponseTypeSafeguardsUpdate || resp.Type == ResponsesStreamResponseTypeInteractionEvent {
 		return nil
 	}
 
 	result := &BifrostResponsesStreamResponse{
 		Type:           resp.Type,
 		SequenceNumber: resp.SequenceNumber,
+		EventID:        resp.EventID,
 	}
 
 	// Copy nested response (applies defaults)

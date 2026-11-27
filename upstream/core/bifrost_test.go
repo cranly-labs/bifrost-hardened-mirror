@@ -5814,6 +5814,124 @@ func TestFallbackKeyPinMatrix(t *testing.T) {
 	}
 }
 
+// continuationProvider is a provider that places a continued turn.
+type continuationProvider struct {
+	schemas.Provider
+	calls int
+}
+
+func (p *continuationProvider) ContinuationKeys(_ *schemas.BifrostContext, _ *schemas.BifrostResponsesRequest, keys []schemas.Key) ([]schemas.Key, *schemas.BifrostError) {
+	p.calls++
+	return keys[1:], nil
+}
+
+// TestNarrowContinuationKeys pins that only a Responses request that continues a turn, with more than one
+// key, asks the provider where the turn is stored.
+func TestNarrowContinuationKeys(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	keys := []schemas.Key{{ID: "a"}, {ID: "b"}}
+	request := func(previous *string) *schemas.BifrostRequest {
+		return &schemas.BifrostRequest{RequestType: schemas.ResponsesRequest, ResponsesRequest: &schemas.BifrostResponsesRequest{Params: &schemas.ResponsesParameters{PreviousResponseID: previous}}}
+	}
+	provider := &continuationProvider{}
+	if got, err := narrowContinuationKeys(ctx, provider, request(schemas.Ptr("v1_x")), keys); err != nil || len(got) != 1 || got[0].ID != "b" {
+		t.Errorf("got %v, want the key that reaches the turn", got)
+	}
+	narrow := func(provider schemas.Provider, req *schemas.BifrostRequest) []schemas.Key {
+		got, _ := narrowContinuationKeys(ctx, provider, req, keys)
+		return got
+	}
+	for name, got := range map[string][]schemas.Key{
+		"no previous turn": narrow(provider, request(nil)),
+		"empty id":         narrow(provider, request(schemas.Ptr(""))),
+		"no params":        narrow(provider, &schemas.BifrostRequest{ResponsesRequest: &schemas.BifrostResponsesRequest{}}),
+		"chat":             narrow(provider, &schemas.BifrostRequest{RequestType: schemas.ChatCompletionRequest}),
+		"other provider":   narrow(struct{ schemas.Provider }{}, request(schemas.Ptr("v1_x"))),
+	} {
+		if len(got) != 2 {
+			t.Errorf("%s: got %v, want every key", name, got)
+		}
+	}
+	narrowContinuationKeys(ctx, provider, request(schemas.Ptr("v1_x")), keys[:1])
+	if provider.calls != 1 {
+		t.Errorf("the provider was asked %d times, want 1", provider.calls)
+	}
+}
+
+// BenchmarkNarrowContinuationKeys measures what a request that continues nothing pays.
+func BenchmarkNarrowContinuationKeys(b *testing.B) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	keys := []schemas.Key{{ID: "a"}, {ID: "b"}}
+	req := &schemas.BifrostRequest{RequestType: schemas.ResponsesRequest, ResponsesRequest: &schemas.BifrostResponsesRequest{Params: &schemas.ResponsesParameters{}}}
+	provider := &continuationProvider{}
+	b.ReportAllocs()
+	for b.Loop() {
+		narrowContinuationKeys(ctx, provider, req, keys)
+	}
+}
+
+// TestVertexInteractionsLifecycleKeySelection pins that a call on a stored Vertex run, which names no
+// model to choose a key by, never picks a key whose region cannot serve Interactions while another can.
+// A pinned key and every other request keep the full pool.
+func TestVertexInteractionsLifecycleKeySelection(t *testing.T) {
+	account := NewMockAccount()
+	account.AddProvider(schemas.Vertex, 5, 1000)
+	key := func(id, region string) schemas.Key {
+		return schemas.Key{ID: id, Name: id, Models: schemas.WhiteList{"*"}, Weight: 1, VertexKeyConfig: &schemas.VertexKeyConfig{
+			ProjectID: *schemas.NewSecretVar("p1"), Region: *schemas.NewSecretVar(region), AuthCredentials: *schemas.NewSecretVar("{}"),
+		}}
+	}
+	account.SetKeysForProvider(schemas.Vertex, []schemas.Key{key("regional", "us-central1"), key("global", "global"), key("eu", "eu")})
+	client, err := Init(context.Background(), schemas.BifrostConfig{Account: account, Logger: NewDefaultLogger(schemas.LogLevelError)})
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	t.Cleanup(client.Shutdown)
+	pool := func(ctx *schemas.BifrostContext, requestType schemas.RequestType, model string) []string {
+		t.Helper()
+		var keys []schemas.Key
+		var err error
+		if isResponsesLifecycleRequestType(requestType) {
+			// The worker walks these keys for a call that addresses a stored object by id.
+			if keys, err = client.getKeysForBatchAndFileOps(ctx, schemas.Vertex, schemas.Vertex, nil, false); err == nil {
+				keys = narrowVertexInteractionsKeys(ctx, schemas.Vertex, requestType, "", keys)
+			}
+		} else {
+			keys, _, err = client.selectKeyFromProviderForModelWithPool(ctx, requestType, schemas.Vertex, model, schemas.Vertex)
+		}
+		if err != nil {
+			t.Fatalf("select key: %v", err)
+		}
+		var ids []string
+		for _, k := range keys {
+			ids = append(ids, k.ID)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	newCtx := func() *schemas.BifrostContext {
+		return schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	}
+	for _, requestType := range []schemas.RequestType{schemas.ResponsesRetrieveRequest, schemas.ResponsesRetrieveStreamRequest, schemas.ResponsesCancelRequest, schemas.ResponsesDeleteRequest, schemas.ResponsesInputItemsRequest} {
+		if got := pool(newCtx(), requestType, ""); !slices.Equal(got, []string{"eu", "global"}) {
+			t.Errorf("%s: got %v, want the keys in locations that serve Interactions", requestType, got)
+		}
+	}
+	if got := pool(newCtx(), schemas.ResponsesRequest, "gemini-3.8-flash"); !slices.Equal(got, []string{"eu", "global", "regional"}) {
+		t.Errorf("a create keeps the full pool, got %v", got)
+	}
+	located := newCtx()
+	located.SetValue(schemas.BifrostContextKeyInteractionsLocation, "eu")
+	if got := pool(located, schemas.ResponsesRequest, "gemini-3.8-flash"); !slices.Equal(got, []string{"eu"}) {
+		t.Errorf("a create on a path naming a location: got %v, want that location's key", got)
+	}
+	pinned := newCtx()
+	pinned.SetValue(schemas.BifrostContextKeyAPIKeyName, "regional")
+	if got := pool(pinned, schemas.ResponsesRetrieveRequest, ""); !slices.Equal(got, []string{"regional"}) {
+		t.Errorf("a pinned key is used as asked, got %v", got)
+	}
+}
+
 // allowedKeysAccount mirrors the transport account: it offers only the keys a virtual key allows,
 // read from the per-attempt governance context value.
 type allowedKeysAccount struct {
@@ -9780,6 +9898,140 @@ func TestPatternKeyAliasTemplateFollowsSelectedKey(t *testing.T) {
 	}
 }
 
+// TestKeyAliasResolvesAdvisorToolModel pins that advisor tool models follow the attempt key's alias.
+func TestKeyAliasResolvesAdvisorToolModel(t *testing.T) {
+	var mu sync.Mutex
+	var calls [][3]string // key, request model, advisor model
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		model := gjson.GetBytes(body, "model").String()
+		mu.Lock()
+		calls = append(calls, [3]string{r.Header.Get("x-api-key"), model, gjson.GetBytes(body, "tools.0.model").String()})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(model, "fail.") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m",`+
+			`"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	t.Cleanup(server.Close)
+	lastCall := func() [3]string {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls[len(calls)-1]
+	}
+
+	const requested = "anthropic.claude-opus-5"
+	newRequest := func() *schemas.BifrostResponsesRequest {
+		return &schemas.BifrostResponsesRequest{
+			Provider: schemas.Anthropic,
+			Model:    requested,
+			Input: []schemas.ResponsesMessage{{
+				Role:    new(schemas.ResponsesInputMessageRoleUser),
+				Content: &schemas.ResponsesMessageContent{ContentStr: new("hi")},
+			}},
+			Params: &schemas.ResponsesParameters{Tools: []schemas.ResponsesTool{{
+				Type:                 schemas.ResponsesToolTypeAdvisor,
+				ResponsesToolAdvisor: &schemas.ResponsesToolAdvisor{Model: requested},
+			}}},
+			RawRequestBody: []byte(`{"model":"` + requested + `","max_tokens":64,"messages":[{"role":"user","content":"hi"}],` +
+				`"tools":[{"type":"advisor_20260301","name":"advisor","model":"` + requested + `"}]}`),
+		}
+	}
+	send := func(client *Bifrost, request *schemas.BifrostResponsesRequest, raw bool) *schemas.BifrostError {
+		ctx := schemas.NewBifrostContext(context.Background(), time.Now().Add(30*time.Second))
+		defer ctx.Cancel()
+		if raw {
+			ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+		}
+		_, bifrostErr := client.ResponsesRequest(ctx, request)
+		return bifrostErr
+	}
+
+	t.Run("single key", func(t *testing.T) {
+		account := NewMockAccount()
+		account.AddProviderWithBaseURL(schemas.Anthropic, 1, 1, server.URL)
+		account.configs[schemas.Anthropic].NetworkConfig.MaxRetries = 0
+		account.SetKeysForProvider(schemas.Anthropic, []schemas.Key{{
+			ID: "sk-alias", Value: *schemas.NewSecretVar("sk-alias"), Models: schemas.WhiteList{"*"}, Weight: 100,
+			Aliases: schemas.KeyAliases{requested: {ModelID: "claude-opus-5"}},
+		}})
+		client, initErr := Init(context.Background(), schemas.BifrostConfig{Account: account, Logger: NewNoOpLogger()})
+		if initErr != nil {
+			t.Fatalf("Init failed: %v", initErr)
+		}
+		t.Cleanup(client.Shutdown)
+
+		for _, raw := range []bool{false, true} {
+			request := newRequest()
+			if bifrostErr := send(client, request, raw); bifrostErr != nil {
+				t.Fatalf("raw=%v: request failed: %s", raw, bifrostErr.Error.Message)
+			}
+			if got := lastCall(); got[1] != "claude-opus-5" || got[2] != "claude-opus-5" {
+				t.Errorf("raw=%v: upstream model=%q advisor model=%q, want both claude-opus-5", raw, got[1], got[2])
+			}
+			if got := request.Params.Tools[0].ResponsesToolAdvisor.Model; got != requested {
+				t.Errorf("raw=%v: caller's advisor model rewritten to %q", raw, got)
+			}
+			if got := gjson.GetBytes(request.RawRequestBody, "tools.0.model").String(); got != requested {
+				t.Errorf("raw=%v: caller's raw advisor model rewritten to %q", raw, got)
+			}
+		}
+
+		// An advisor declared in an additional_tools item is hoisted into the tools during prep.
+		declared := json.RawMessage(`[{"type":"advisor","model":"` + requested + `"}]`)
+		request := newRequest()
+		request.Params = nil
+		request.RawRequestBody = nil
+		request.Input = append(request.Input, schemas.ResponsesMessage{Type: new(schemas.ResponsesMessageTypeAdditionalTools), AdditionalTools: declared})
+		if bifrostErr := send(client, request, false); bifrostErr != nil {
+			t.Fatalf("additional_tools: request failed: %s", bifrostErr.Error.Message)
+		}
+		if got := lastCall(); got[2] != "claude-opus-5" {
+			t.Errorf("additional_tools: upstream advisor model=%q, want claude-opus-5", got[2])
+		}
+		if got := string(request.Input[1].AdditionalTools); got != string(declared) {
+			t.Errorf("additional_tools: caller's declaration rewritten to %s", got)
+		}
+	})
+
+	t.Run("each retry follows its key", func(t *testing.T) {
+		account := NewMockAccount()
+		account.AddProviderWithBaseURL(schemas.Anthropic, 1, 1, server.URL)
+		account.configs[schemas.Anthropic].NetworkConfig.MaxRetries = 2
+		account.configs[schemas.Anthropic].NetworkConfig.RetryBackoffInitial = time.Millisecond
+		account.configs[schemas.Anthropic].NetworkConfig.RetryBackoffMax = 2 * time.Millisecond
+		account.SetKeysForProvider(schemas.Anthropic, []schemas.Key{
+			{ID: "sk-fail", Value: *schemas.NewSecretVar("sk-fail"), Models: schemas.WhiteList{"*"}, Weight: 1,
+				Aliases: schemas.KeyAliases{requested: {ModelID: "fail.claude-opus-5"}}},
+			{ID: "sk-plain", Value: *schemas.NewSecretVar("sk-plain"), Models: schemas.WhiteList{"*"}, Weight: 1},
+		})
+		client, initErr := Init(context.Background(), schemas.BifrostConfig{Account: account, Logger: NewNoOpLogger()})
+		if initErr != nil {
+			t.Fatalf("Init failed: %v", initErr)
+		}
+		t.Cleanup(client.Shutdown)
+
+		for i := 0; i < 20; i++ {
+			for _, raw := range []bool{false, true} {
+				if bifrostErr := send(client, newRequest(), raw); bifrostErr != nil {
+					t.Fatalf("raw=%v: request %d failed: %s", raw, i, bifrostErr.Error.Message)
+				}
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, call := range calls {
+			if call[0] == "sk-fail" && call[2] != "fail.claude-opus-5" || call[0] == "sk-plain" && call[2] != requested {
+				t.Errorf("key %q sent advisor model %q with request model %q", call[0], call[2], call[1])
+			}
+		}
+	})
+}
+
 // customToolProvider answers with a function call to apply_patch, the way a wire that
 // took the rewritten custom tool does, and records what it was sent.
 type customToolProvider struct {
@@ -10547,5 +10799,268 @@ func TestPreparePassthroughBody(t *testing.T) {
 	req = &schemas.BifrostPassthroughRequest{Body: []byte(`{"model":"gpt-4o"}`)}
 	if err := preparePassthroughBody(plainFileProvider{}, req); err != nil || string(req.Body) != `{"model":"gpt-4o"}` {
 		t.Errorf("a JSON Body must be left as is, got %q", req.Body)
+	}
+}
+
+// keyServiceTierUpstream answers OpenAI chat completions, recording which API key each call
+// carried and the service_tier on its body; keys in rateLimited get a 429.
+type keyServiceTierUpstream struct {
+	mu          sync.Mutex
+	calls       []string // "<api key>:<service_tier>"
+	rateLimited map[string]bool
+}
+
+func (u *keyServiceTierUpstream) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		u.mu.Lock()
+		u.calls = append(u.calls, apiKey+":"+gjson.GetBytes(body, "service_tier").String())
+		u.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if u.rateLimited[apiKey] {
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"error":{"message":"Resource exhausted. Please try again later.","type":"rate_limit_error"}}`)
+			return
+		}
+		fmt.Fprintf(w, `{"id":"c1","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, gjson.GetBytes(body, "model").String())
+	}
+}
+
+// TestKeyServiceTier pins the key and alias service_tier end to end on the wire: a weight-0
+// spare key with a tier serves only after the weighted key is rate limited, an alias tier
+// overrides its key's, a key or alias tier overrides the one the caller sends, and the
+// caller's tier passes through only when neither sets one.
+func TestKeyServiceTier(t *testing.T) {
+	priority := schemas.BifrostServiceTierPriority
+	flex := schemas.BifrostServiceTierFlex
+	standardKey := schemas.Key{ID: "standard", Value: *schemas.NewSecretVar("sk-standard"), Models: schemas.WhiteList{"*"}, Weight: 1}
+	priorityKey := schemas.Key{ID: "priority", Value: *schemas.NewSecretVar("sk-priority"), Models: schemas.WhiteList{"*"}, Weight: 0, ServiceTier: &priority}
+
+	run := func(t *testing.T, keys []schemas.Key, rateLimited map[string]bool, req *schemas.BifrostChatRequest) ([]string, *schemas.BifrostError) {
+		t.Helper()
+		upstream := &keyServiceTierUpstream{rateLimited: rateLimited}
+		server := httptest.NewServer(upstream.handler())
+		t.Cleanup(server.Close)
+		account := NewMockAccount()
+		account.AddProviderWithBaseURL(schemas.OpenAI, 1, 10, server.URL)
+		account.configs[schemas.OpenAI].NetworkConfig.MaxRetries = 1
+		account.configs[schemas.OpenAI].NetworkConfig.RetryBackoffInitial = time.Millisecond
+		account.configs[schemas.OpenAI].NetworkConfig.RetryBackoffMax = time.Millisecond
+		account.SetKeysForProvider(schemas.OpenAI, keys)
+		client := newStreamTestClient(t, account)
+		req.Provider = schemas.OpenAI
+		req.Input = []schemas.ChatMessage{{Role: schemas.ChatMessageRoleUser, Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("hi")}}}
+		_, bifrostErr := client.ChatCompletionRequest(schemas.NewBifrostContext(context.Background(), time.Now().Add(30*time.Second)), req)
+		upstream.mu.Lock()
+		defer upstream.mu.Unlock()
+		return slices.Clone(upstream.calls), bifrostErr
+	}
+
+	t.Run("spare_key_serves_after_rate_limit", func(t *testing.T) {
+		calls, bifrostErr := run(t, []schemas.Key{standardKey, priorityKey}, map[string]bool{"sk-standard": true}, &schemas.BifrostChatRequest{Model: "gpt-4o-mini"})
+		if bifrostErr != nil {
+			t.Fatalf("expected the priority key to serve, got %s", bifrostErr.Error.Message)
+		}
+		if want := []string{"sk-standard:", "sk-priority:priority"}; !slices.Equal(calls, want) {
+			t.Fatalf("upstream calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("spare_key_idle_while_weighted_key_serves", func(t *testing.T) {
+		for range 5 {
+			calls, bifrostErr := run(t, []schemas.Key{standardKey, priorityKey}, nil, &schemas.BifrostChatRequest{Model: "gpt-4o-mini"})
+			if bifrostErr != nil {
+				t.Fatalf("unexpected error: %s", bifrostErr.Error.Message)
+			}
+			if want := []string{"sk-standard:"}; !slices.Equal(calls, want) {
+				t.Fatalf("upstream calls = %v, want %v", calls, want)
+			}
+		}
+	})
+
+	t.Run("alias_tier_overrides_key_tier", func(t *testing.T) {
+		key := priorityKey
+		key.Weight = 1
+		key.Aliases = schemas.KeyAliases{"flex-model": {ModelID: "gpt-4o-mini", ServiceTier: &flex}}
+		calls, bifrostErr := run(t, []schemas.Key{key}, nil, &schemas.BifrostChatRequest{Model: "flex-model"})
+		if bifrostErr != nil {
+			t.Fatalf("unexpected error: %s", bifrostErr.Error.Message)
+		}
+		if want := []string{"sk-priority:flex"}; !slices.Equal(calls, want) {
+			t.Fatalf("upstream calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("key_tier_overrides_request_tier", func(t *testing.T) {
+		key := priorityKey
+		key.Weight = 1
+		calls, bifrostErr := run(t, []schemas.Key{key}, nil, &schemas.BifrostChatRequest{Model: "gpt-4o-mini", Params: &schemas.ChatParameters{ServiceTier: &flex}})
+		if bifrostErr != nil {
+			t.Fatalf("unexpected error: %s", bifrostErr.Error.Message)
+		}
+		if want := []string{"sk-priority:priority"}; !slices.Equal(calls, want) {
+			t.Fatalf("upstream calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("alias_tier_overrides_request_tier", func(t *testing.T) {
+		key := priorityKey
+		key.Weight = 1
+		key.Aliases = schemas.KeyAliases{"flex-model": {ModelID: "gpt-4o-mini", ServiceTier: &flex}}
+		calls, bifrostErr := run(t, []schemas.Key{key}, nil, &schemas.BifrostChatRequest{Model: "flex-model", Params: &schemas.ChatParameters{ServiceTier: &priority}})
+		if bifrostErr != nil {
+			t.Fatalf("unexpected error: %s", bifrostErr.Error.Message)
+		}
+		if want := []string{"sk-priority:flex"}; !slices.Equal(calls, want) {
+			t.Fatalf("upstream calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("request_tier_passes_without_key_tier", func(t *testing.T) {
+		calls, bifrostErr := run(t, []schemas.Key{standardKey}, nil, &schemas.BifrostChatRequest{Model: "gpt-4o-mini", Params: &schemas.ChatParameters{ServiceTier: &flex}})
+		if bifrostErr != nil {
+			t.Fatalf("unexpected error: %s", bifrostErr.Error.Message)
+		}
+		if want := []string{"sk-standard:flex"}; !slices.Equal(calls, want) {
+			t.Fatalf("upstream calls = %v, want %v", calls, want)
+		}
+	})
+}
+
+// TestApplyKeyServiceTier pins the copy-on-write contract of the per-attempt tier fill: the
+// caller's request is never mutated, and a request that needs no change is returned as-is.
+func TestApplyKeyServiceTier(t *testing.T) {
+	priority := schemas.BifrostServiceTierPriority
+	flex := schemas.BifrostServiceTierFlex
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	tiered := schemas.Key{ServiceTier: &priority}
+
+	chat := &schemas.BifrostChatRequest{Model: "m", Params: &schemas.ChatParameters{Temperature: schemas.Ptr(0.5)}}
+	out := applyKeyServiceTierChat(ctx, &tiered, chat)
+	if out == chat || out.Params == chat.Params || out.Params.ServiceTier == nil || *out.Params.ServiceTier != priority {
+		t.Fatalf("expected a copy carrying the key tier, got %+v", out.Params)
+	}
+	if chat.Params.ServiceTier != nil || out.Params.Temperature == nil || *out.Params.Temperature != 0.5 {
+		t.Fatalf("caller request mutated or params lost: caller=%+v copy=%+v", chat.Params, out.Params)
+	}
+	if noParams := (&schemas.BifrostChatRequest{Model: "m"}); applyKeyServiceTierChat(ctx, &tiered, noParams).Params.ServiceTier == nil {
+		t.Fatal("a request without params must still get the key tier")
+	}
+	explicit := &schemas.BifrostChatRequest{Params: &schemas.ChatParameters{ServiceTier: &flex}}
+	if got := applyKeyServiceTierChat(ctx, &tiered, explicit); got == explicit || *got.Params.ServiceTier != priority || *explicit.Params.ServiceTier != flex {
+		t.Fatalf("the key tier must override the caller's on a copy, got %q, caller %q", *got.Params.ServiceTier, *explicit.Params.ServiceTier)
+	}
+	same := &schemas.BifrostChatRequest{Params: &schemas.ChatParameters{ServiceTier: &priority}}
+	if applyKeyServiceTierChat(ctx, &tiered, same) != same {
+		t.Fatal("a request already carrying the key tier must be returned unchanged")
+	}
+	if allocs := testing.AllocsPerRun(100, func() { applyKeyServiceTierChat(ctx, &tiered, same) }); allocs != 0 {
+		t.Fatalf("a request already carrying the key tier must not allocate, got %v allocs", allocs)
+	}
+	if untiered := (&schemas.BifrostChatRequest{Params: &schemas.ChatParameters{ServiceTier: &flex}}); applyKeyServiceTierChat(ctx, &schemas.Key{}, untiered) != untiered {
+		t.Fatal("the caller's tier must pass through a key without one")
+	}
+	if applyKeyServiceTierChat(ctx, &schemas.Key{}, chat) != chat {
+		t.Fatal("a key without a tier must return the request unchanged")
+	}
+
+	responses := &schemas.BifrostResponsesRequest{Model: "m"}
+	if got := applyKeyServiceTierResponses(ctx, &tiered, responses); got == responses || got.Params == nil || *got.Params.ServiceTier != priority || responses.Params != nil {
+		t.Fatalf("responses: expected a copy carrying the key tier and an untouched caller request, got %+v", got.Params)
+	}
+	explicitResponses := &schemas.BifrostResponsesRequest{Model: "m", Params: &schemas.ResponsesParameters{ServiceTier: &flex}}
+	if got := applyKeyServiceTierResponses(ctx, &tiered, explicitResponses); *got.Params.ServiceTier != priority || *explicitResponses.Params.ServiceTier != flex {
+		t.Fatal("responses: the key tier must override the caller's on a copy")
+	}
+
+	// The resolved alias wins over the key, in both directions of set/unset.
+	aliasCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	aliasCtx.SetValue(schemas.BifrostContextKeyResolvedAlias, &schemas.ResolvedAlias{Key: "a", Config: &schemas.AliasConfig{ModelID: "m", ServiceTier: &flex}})
+	aliased := schemas.Key{ServiceTier: &priority, Aliases: schemas.KeyAliases{"a": {ModelID: "m", ServiceTier: &flex}}}
+	if got := applyKeyServiceTierChat(aliasCtx, &aliased, &schemas.BifrostChatRequest{Model: "m"}); *got.Params.ServiceTier != flex {
+		t.Fatalf("alias tier must override the key tier, got %q", *got.Params.ServiceTier)
+	}
+	aliasOnly := schemas.Key{Aliases: schemas.KeyAliases{"a": {ModelID: "m", ServiceTier: &flex}}}
+	if got := applyKeyServiceTierChat(aliasCtx, &aliasOnly, &schemas.BifrostChatRequest{Model: "m"}); got.Params == nil || *got.Params.ServiceTier != flex {
+		t.Fatal("an alias tier must apply when the key sets none")
+	}
+}
+
+// A key with no tier and no aliases, the common case, must add no allocations.
+func BenchmarkApplyKeyServiceTier_NoTier(b *testing.B) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	req := &schemas.BifrostChatRequest{Model: "m", Params: &schemas.ChatParameters{}}
+	key := schemas.Key{ID: "k"}
+	b.ReportAllocs()
+	for b.Loop() {
+		if applyKeyServiceTierChat(ctx, &key, req) != req {
+			b.Fatal("request must be returned unchanged")
+		}
+	}
+}
+
+// A key with a tier copies the request and its params once per attempt.
+func BenchmarkApplyKeyServiceTier_KeyTier(b *testing.B) {
+	priority := schemas.BifrostServiceTierPriority
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	req := &schemas.BifrostChatRequest{Model: "m", Params: &schemas.ChatParameters{}}
+	key := schemas.Key{ID: "k", ServiceTier: &priority}
+	b.ReportAllocs()
+	for b.Loop() {
+		if applyKeyServiceTierChat(ctx, &key, req) == req {
+			b.Fatal("request must be copied")
+		}
+	}
+}
+
+// TestResolveRawAdvisorToolAliases_AllocationScaling pins that resolving aliased advisor tool models
+// stays linear in the number of advisor tools instead of rewriting the whole body once per tool.
+func TestResolveRawAdvisorToolAliases_AllocationScaling(t *testing.T) {
+	aliases := schemas.KeyAliases{"advisor-alias": {ModelID: "claude-opus-4-8"}}
+	memtest.AssertAllocScaling(t, func(tools int) []byte {
+		var b strings.Builder
+		b.WriteString(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}],"tools":[`)
+		for i := range tools {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"type":"advisor_20260301","name":"advisor_%d","model":"advisor-alias","description":"%s"}`, i, strings.Repeat("x", 300))
+		}
+		b.WriteString(`]}`)
+		return []byte(b.String())
+	}, func(body []byte) {
+		if resolveRawAdvisorToolAliases(aliases, body) == nil {
+			t.Fatal("expected the advisor aliases to resolve")
+		}
+	})
+}
+
+// TestResolveRawAdvisorToolAliases_NoMatchDoesNotAllocatePerTool pins that a request with no aliased
+// advisor tool pays nothing proportional to its tools array: nothing is built until a match is found.
+func TestResolveRawAdvisorToolAliases_NoMatchDoesNotAllocatePerTool(t *testing.T) {
+	aliases := schemas.KeyAliases{"advisor-alias": {ModelID: "claude-opus-4-8"}}
+	build := func(tools int) []byte {
+		var b strings.Builder
+		b.WriteString(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}],"tools":[`)
+		for i := range tools {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"type":"function","name":"tool_%d","description":"%s","input_schema":{"type":"object"}}`, i, strings.Repeat("x", 200))
+		}
+		b.WriteString(`]}`)
+		return []byte(b.String())
+	}
+	allocs := func(body []byte) float64 {
+		return testing.AllocsPerRun(50, func() {
+			if resolveRawAdvisorToolAliases(aliases, body) != nil {
+				t.Fatal("no advisor alias matches, so the body must not be rewritten")
+			}
+		})
+	}
+	one, many := allocs(build(1)), allocs(build(200))
+	if many > one {
+		t.Fatalf("no-match allocations grew with the tools array: %.0f allocs for 1 tool, %.0f for 200", one, many)
 	}
 }

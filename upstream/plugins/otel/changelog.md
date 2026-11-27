@@ -1,2 +1,3 @@
-- feat: optional `apply_trace_dimensions_to_child_spans` profile flag merges `x-bf-dim-*` dimensions onto every exported span; span attributes win on conflict, reserved keys are skipped (thanks [@devin-williams](https://github.com/devin-williams)!)
-- chore: upgraded Go to 1.27.4, core to v1.16.0 and framework to v1.13.0
+- feat: settled relay job costs are added to relay cost, without counting a relay call
+- fix: metric labels come from the enrichment registry, adding `alias`, `app`, `routing_engine_used`, `routing_rule_id`, `routing_rule_name` and `complexity_tier`
+- chore: upgraded core to v1.17.0 and framework to v1.14.0

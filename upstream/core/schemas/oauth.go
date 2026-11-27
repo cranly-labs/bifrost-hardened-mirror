@@ -40,8 +40,11 @@ type OAuth2Provider interface {
 	// row ID for MCPAuthModeVK, the session ID for MCPAuthModeSession). For
 	// MCPAuthModeUser flows where no UserID is available in context yet
 	// (external MCP client OAuth init), the column is left NULL and stamped
-	// at completion. Returns (flow initiation details, flow row ID, error).
-	InitiateUserOAuthFlow(ctx context.Context, oauthConfigID string, mcpClientID string, redirectURI string, flowMode MCPAuthMode) (*OAuth2FlowInitiation, string, error)
+	// at completion. origin names the dashboard page the sign-in starts from,
+	// which the callback returns a signed-in caller to; "" for none. A reused
+	// pending flow takes the origin of this initiation. Returns (flow
+	// initiation details, flow row ID, error).
+	InitiateUserOAuthFlow(ctx context.Context, oauthConfigID string, mcpClientID string, redirectURI string, flowMode MCPAuthMode, origin string) (*OAuth2FlowInitiation, string, error)
 
 	// CompleteUserOAuthFlow handles the OAuth callback for a per-user flow.
 	// Returns the caller and MCP client the new token was stored for, as the
@@ -99,6 +102,11 @@ type OAuth2Provider interface {
 	// integration is configured, and *TokenExchangeRejectedError when the
 	// provider refused the exchange.
 	GetExchangedAccessToken(ctx *BifrostContext, config *MCPClientConfig) (string, error)
+
+	// GetClientCredentialsAccessToken returns the shared access token for config
+	// (AuthType == client_credentials), minted with the client_credentials grant
+	// and cached until shortly before it expires.
+	GetClientCredentialsAccessToken(ctx context.Context, config *MCPClientConfig) (string, error)
 }
 
 // TokenExchangeRejectedError reports that the identity provider refused a

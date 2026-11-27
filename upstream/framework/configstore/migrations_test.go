@@ -4403,6 +4403,58 @@ func TestMigrationAddOAuth2RefreshTokenClientDisplayNameColumnBoundsLockWait(t *
 	assert.True(t, postgresconn.IsLockNotAvailableError(err), "expected lock_not_available, got: %v", err)
 }
 
+// The origin column is added to an existing mcp_oauth_flows table, twice without error, and a
+// flow started before it gets "", so its callback returns to the default page.
+func TestMigrationAddMCPOauthFlowOriginColumn(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.Exec("CREATE TABLE mcp_oauth_flows (id VARCHAR(255) PRIMARY KEY, state VARCHAR(255))").Error)
+	require.NoError(t, db.Exec("INSERT INTO mcp_oauth_flows (id, state) VALUES ('existing', 'state-1')").Error)
+	for range 2 {
+		require.NoError(t, migrationAddMCPOauthFlowOriginColumn(context.Background(), db, testMigrationLogger))
+	}
+	require.True(t, db.Migrator().HasColumn(&tables.TableMCPOauthFlow{}, "origin"))
+	var origin *string
+	require.NoError(t, db.Raw("SELECT origin FROM mcp_oauth_flows WHERE id = 'existing'").Scan(&origin).Error)
+	require.NotNil(t, origin)
+	assert.Equal(t, "", *origin)
+}
+
+// TestMigrationAddMCPOauthFlowOriginColumnBoundsLockWait pins that on postgres the migration
+// gives up on a held mcp_oauth_flows lock (lock_not_available, which the startup retry handles)
+// instead of queueing every OAuth callback behind it.
+func TestMigrationAddMCPOauthFlowOriginColumnBoundsLockWait(t *testing.T) {
+	var db *gorm.DB
+	for _, ndb := range indexMigrationDBs(t) {
+		if ndb.name == "postgres" {
+			db = ndb.db
+		}
+	}
+	if db == nil {
+		t.Skip("local test Postgres is not reachable")
+	}
+	require.NoError(t, db.Exec("CREATE TABLE mcp_oauth_flows (id VARCHAR(255) PRIMARY KEY)").Error)
+
+	ctx := context.Background()
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	reader, err := sqlDB.Conn(ctx)
+	require.NoError(t, err)
+	defer reader.Close()
+	_, err = reader.ExecContext(ctx, "BEGIN")
+	require.NoError(t, err)
+	defer reader.ExecContext(ctx, "ROLLBACK") //nolint:errcheck
+	// A long reader's ACCESS SHARE lock conflicts with the ACCESS EXCLUSIVE lock ALTER TABLE needs.
+	_, err = reader.ExecContext(ctx, "SELECT * FROM mcp_oauth_flows")
+	require.NoError(t, err)
+
+	migrateCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	err = migrationAddMCPOauthFlowOriginColumn(migrateCtx, db, testMigrationLogger)
+	require.Error(t, err)
+	assert.True(t, postgresconn.IsLockNotAvailableError(err), "expected lock_not_available, got: %v", err)
+}
+
 // TestMigrationWidenOAuth2ClientControlledColumns verifies the upgrade path: an
 // existing deployment whose client-controlled OAuth2 columns are still varchar
 // accepts arbitrarily long values in each once the migration has run. On
@@ -6010,6 +6062,36 @@ func TestMigrationAddAnthropicWorkloadIdentityColumn(t *testing.T) {
 	assert.Equal(t, "svac_01def", found.AnthropicKeyConfig.WorkloadIdentity.ServiceAccountID.GetValue())
 }
 
+func TestMigrationAddMCPClientClientCredentialsJSONColumn(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	const column = "client_credentials_json"
+
+	require.NoError(t, db.AutoMigrate(&tables.TableMCPClient{}))
+	require.NoError(t, db.Migrator().DropColumn(&tables.TableMCPClient{}, column))
+	require.False(t, db.Migrator().HasColumn(&tables.TableMCPClient{}, column), "precondition: the column must be absent")
+
+	require.NoError(t, migrationAddMCPClientClientCredentialsJSONColumn(ctx, db, testMigrationLogger))
+	assert.True(t, db.Migrator().HasColumn(&tables.TableMCPClient{}, column))
+	require.NoError(t, db.Exec("DELETE FROM migrations WHERE id = ?", "add_mcp_client_client_credentials_json_column").Error)
+	require.NoError(t, migrationAddMCPClientClientCredentialsJSONColumn(ctx, db, testMigrationLogger), "a replay with the column present must not fail")
+}
+
+func TestMigrationAddMCPClientAWSSigV4JSONColumn(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	const column = "aws_sigv4_json"
+
+	require.NoError(t, db.AutoMigrate(&tables.TableMCPClient{}))
+	require.NoError(t, db.Migrator().DropColumn(&tables.TableMCPClient{}, column))
+	require.False(t, db.Migrator().HasColumn(&tables.TableMCPClient{}, column), "precondition: the column must be absent")
+
+	require.NoError(t, migrationAddMCPClientAWSSigV4JSONColumn(ctx, db, testMigrationLogger))
+	assert.True(t, db.Migrator().HasColumn(&tables.TableMCPClient{}, column))
+	require.NoError(t, db.Exec("DELETE FROM migrations WHERE id = ?", "add_mcp_client_aws_sigv4_json_column").Error)
+	require.NoError(t, migrationAddMCPClientAWSSigV4JSONColumn(ctx, db, testMigrationLogger), "a replay with the column present must not fail")
+}
+
 // Postgres silently truncates identifiers past 63 bytes, so a longer column is
 // created under a different name than GORM reads and writes.
 func TestTableModelPricing_ColumnNamesFitPostgresLimit(t *testing.T) {
@@ -6067,4 +6149,26 @@ func TestMigrationAddModelRoutersTable(t *testing.T) {
 	require.NoError(t, migrationAddModelRoutersTable(context.Background(), db, testMigrationLogger))
 	require.NoError(t, migrationAddModelRoutersTable(context.Background(), db, testMigrationLogger), "it runs once")
 	require.True(t, db.Migrator().HasTable(&tables.TableModelRouter{}))
+}
+func TestMigrationWidenProviderJobColumns(t *testing.T) {
+	db, err := gorm.Open(postgres.Open(postgresDSN), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Skip("postgres not available")
+	}
+	if sqlDB, err := db.DB(); err != nil || sqlDB.Ping() != nil {
+		t.Skip("postgres not available")
+	}
+	require.NoError(t, db.Exec("CREATE SCHEMA IF NOT EXISTS "+pgTestSchema).Error)
+	db.Exec("DROP TABLE IF EXISTS batch_jobs CASCADE")
+	t.Cleanup(func() { db.Exec("DROP TABLE IF EXISTS batch_jobs CASCADE") })
+	require.NoError(t, db.Exec(`CREATE TABLE batch_jobs (id VARCHAR(255) PRIMARY KEY, provider_status VARCHAR(50), endpoint VARCHAR(255))`).Error)
+	db.Exec(`CREATE TABLE IF NOT EXISTS migrations (id VARCHAR(255) PRIMARY KEY)`)
+	db.Exec(`DELETE FROM migrations WHERE id = 'widen_batch_jobs_provider_status_and_endpoint'`)
+
+	long := strings.Repeat("x", 400)
+	insert := `INSERT INTO batch_jobs (id, provider_status, endpoint) VALUES ('a', ?, ?)`
+	require.Error(t, db.Exec(insert, long, long).Error, "the varchar columns refuse it before the migration")
+	require.NoError(t, migrationWidenProviderJobColumns(context.Background(), db, testMigrationLogger))
+	require.NoError(t, db.Exec(insert, long, long).Error)
+	require.NoError(t, migrationWidenProviderJobColumns(context.Background(), db, testMigrationLogger), "running it again is a no-op")
 }
